@@ -30,6 +30,17 @@ func (p *Proxy) Llama() *llamacpp.Server {
 	return p.llama
 }
 
+// Close stops the llama.cpp server, if one is running.
+func (p *Proxy) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.llama != nil {
+		p.llama.Stop()
+		p.llama = nil
+	}
+}
+
 // formatJSON pretty-prints JSON for logging.
 func (p *Proxy) formatJSON(data []byte) string {
 	var out bytes.Buffer
@@ -107,6 +118,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var targetURL string
+	var llama *llamacpp.Server
 
 	switch modelType {
 	case "provider":
@@ -136,12 +148,18 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	case "llama-server":
 		p.mu.Lock()
-		if p.llama == nil || p.llama.Selector() != req.Model {
-			// Stop old server if running a different model
-			if p.llama != nil {
-				p.logger.Info("replacing llama server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
-				p.llama.Stop()
-			}
+		// A crashed server is dropped so the next request starts a new one.
+		if p.llama != nil && p.llama.Exited() {
+			p.logger.Info("llama server has exited", slog.String("model", p.llama.Selector()))
+			p.llama = nil
+		}
+		// Stop old server if running a different model
+		if p.llama != nil && p.llama.Selector() != req.Model {
+			p.logger.Info("replacing llama server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
+			p.llama.Stop()
+			p.llama = nil
+		}
+		if p.llama == nil {
 			entry, err := p.cfg.GetLlamaCppEntry(req.Model)
 			if err != nil {
 				p.logger.LogError("failed to get llama server config", err)
@@ -149,16 +167,20 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
 				return
 			}
-			p.llama = llamacpp.NewServer(req.Model, entry, p.logger)
-			if err := p.llama.Start(r.Context()); err != nil {
+			slotSavePath := p.cfg.DefaultServer().SaveSlotPath
+			srv := llamacpp.NewServer(req.Model, entry, slotSavePath, p.logger)
+			// Only keep a server that started, so a failed start is retried.
+			if err := srv.Start(r.Context()); err != nil {
 				p.logger.LogError("failed to start llama server", err)
 				p.mu.Unlock()
 				http.Error(w, fmt.Sprintf(`{"error":{"message":"failed to start local LLM: %s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusServiceUnavailable)
 				return
 			}
+			p.llama = srv
 		}
-		targetURL = p.llama.URL() + "/v1/chat/completions"
+		llama = p.llama
 		p.mu.Unlock()
+		targetURL = llama.URL() + "/v1/chat/completions"
 	}
 
 	p.logger.LogRequest(r.Method, r.URL.Path, req.Model, r.RemoteAddr)
@@ -167,6 +189,26 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		slog.String("session", r.Header.Get("X-Session-Affinity")),
 		slog.Bool("stream", req.Stream),
 	)
+
+	// Slot cache (llama-server only): every request holds the cache slot so
+	// none can clobber it between a session's restore and save. The save runs
+	// after the handler returns, so the client is not kept waiting for it.
+	saveSlot := false
+	if llama != nil && llama.SlotCacheEnabled() {
+		session := r.Header.Get("X-Session-Affinity")
+		release := llama.AcquireSlot(session)
+		defer func() { go release(saveSlot) }()
+
+		// Pin the request to the restored slot and reuse its cached prompt.
+		if session != "" {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(body, &fields); err == nil {
+				fields["id_slot"], _ = json.Marshal(llamacpp.CacheSlot)
+				fields["cache_prompt"], _ = json.Marshal(true)
+				body, _ = json.Marshal(fields)
+			}
+		}
+	}
 
 	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -224,7 +266,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// Stream only successful responses; upstream errors are plain JSON
 	// and are forwarded below with their original status code.
 	if req.Stream && httpResp.StatusCode/100 == 2 {
-		p.streamResponse(w, httpResp, start)
+		saveSlot = p.streamResponse(w, httpResp, start)
 		return
 	}
 
@@ -249,9 +291,11 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", httpResp.Header.Get("X-Request-Id"))
 	w.WriteHeader(httpResp.StatusCode)
 	w.Write(body)
+	saveSlot = httpResp.StatusCode/100 == 2
 }
 
-func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, start time.Time) {
+// streamResponse forwards an SSE stream and reports whether it ran to the end.
+func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, start time.Time) bool {
 	// Set streaming headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -272,7 +316,7 @@ func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, s
 		if n > 0 {
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
 				p.logger.LogError("failed to write stream chunk", writeErr)
-				return
+				return false
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -280,11 +324,11 @@ func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, s
 		}
 		if err == io.EOF {
 			p.logger.LogResponse(httpResp.StatusCode, time.Since(start))
-			return
+			return true
 		}
 		if err != nil {
 			p.logger.LogError("stream read error", err)
-			return
+			return false
 		}
 	}
 }
