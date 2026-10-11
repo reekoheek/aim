@@ -66,16 +66,9 @@ func New(cfg *config.Config, l *logger.Logger) *Proxy {
 	}
 }
 
-// Handler returns the HTTP handler for the proxy.
-func (p *Proxy) Handler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			p.handleCompletion(w, r)
-		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	}
+// Handler is the HTTP handler for the proxy.
+func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
+	p.handleCompletion(w, r)
 }
 
 // CompletionRequest represents the OpenAI chat completion request body.

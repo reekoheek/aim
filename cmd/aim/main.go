@@ -90,7 +90,7 @@ func run(cmd *cobra.Command, args []string) error {
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", p.Handler())
+	mux.HandleFunc("POST /v1/chat/completions", p.Handler)
 
 	server := &http.Server{
 		Addr:    addr,
