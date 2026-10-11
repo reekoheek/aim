@@ -18,11 +18,11 @@ import (
 
 // Proxy is the LLM proxy handler.
 type Proxy struct {
-	cfg     *config.Config
-	logger  *logger.Logger
-	client  *http.Client
-	llama   *llamacpp.Server
-	mu      sync.Mutex
+	cfg    *config.Config
+	logger *logger.Logger
+	client *http.Client
+	llama  *llamacpp.Server
+	mu     sync.Mutex
 }
 
 // Llama returns the llama.cpp server, or nil if not using one.
@@ -51,7 +51,7 @@ func New(cfg *config.Config, l *logger.Logger) *Proxy {
 				DisableKeepAlives: true,
 			},
 		},
-		llama:  nil,
+		llama: nil,
 	}
 }
 
@@ -156,25 +156,10 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 	}
 
-	// Count messages from raw body
-	msgCount := 0
-	if idx := bytes.Index(body, []byte(`"messages"`)); idx >= 0 {
-		arrStart := bytes.Index(body[idx:], []byte("["))
-		if arrStart >= 0 {
-			arrBody := body[idx+arrStart:]
-			for i := 0; i < len(arrBody); i++ {
-				if arrBody[i] == '{' {
-					msgCount++
-				}
-			}
-		}
-	}
-
 	p.logger.LogRequest(r.Method, r.URL.Path, req.Model, r.RemoteAddr)
-	p.logger.LogHeaders(r.Header)
 	p.logger.Info("request metadata",
 		slog.String("target_url", targetURL),
-		slog.Int("messages", msgCount),
+		slog.String("session", r.Header.Get("X-Session-Affinity")),
 		slog.Bool("stream", req.Stream),
 	)
 
