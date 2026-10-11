@@ -8,17 +8,26 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/llamacpp"
 )
 
 // Proxy is the LLM proxy handler.
 type Proxy struct {
-	cfg    *config.Config
-	logger *logger.Logger
-	client *http.Client
+	cfg     *config.Config
+	logger  *logger.Logger
+	client  *http.Client
+	llama   *llamacpp.Server
+	mu      sync.Mutex
+}
+
+// Llama returns the llama.cpp server, or nil if not using one.
+func (p *Proxy) Llama() *llamacpp.Server {
+	return p.llama
 }
 
 // formatJSON pretty-prints JSON for logging.
@@ -37,7 +46,12 @@ func New(cfg *config.Config, l *logger.Logger) *Proxy {
 		logger: l,
 		// No overall timeout: long streaming generations must not be cut off.
 		// The request is canceled when the downstream client disconnects.
-		client: &http.Client{},
+		client: &http.Client{
+			Transport: &http.Transport{
+				DisableKeepAlives: true,
+			},
+		},
+		llama:  nil,
 	}
 }
 
@@ -85,37 +99,64 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve model
-	providerID, modelName, err := p.cfg.ResolveModel(req.Model)
+	modelType, info, err := p.cfg.ResolveModel(req.Model)
 	if err != nil {
 		p.logger.LogError("failed to resolve model", err, slog.String("model", req.Model))
 		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"invalid_request_error","param":"model","code":null}}`, err.Error()), http.StatusBadRequest)
 		return
 	}
 
-	// Get provider
-	provider, err := p.cfg.GetProvider(providerID)
-	if err != nil {
-		p.logger.LogError("failed to get provider", err, slog.String("provider", providerID))
-		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
-		return
+	var targetURL string
+
+	switch modelType {
+	case "provider":
+		provider, err := p.cfg.GetProvider(info["provider"].(string))
+		if err != nil {
+			p.logger.LogError("failed to get provider", err, slog.String("provider", info["provider"].(string)))
+			http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+
+		// Rewrite model name
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			p.logger.LogError("failed to parse request body", err)
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		fields["model"], _ = json.Marshal(info["model"].(string))
+		body, err = json.Marshal(fields)
+		if err != nil {
+			p.logger.LogError("failed to encode upstream request body", err)
+			http.Error(w, "failed to encode upstream request body", http.StatusInternalServerError)
+			return
+		}
+
+		targetURL = provider.BaseURL + "/v1/chat/completions"
+
+	case "llama.cpp":
+		p.mu.Lock()
+		if p.llama == nil {
+			entry, err := p.cfg.GetLlamaCppEntry(req.Model)
+			if err != nil {
+				p.logger.LogError("failed to get llama.cpp config", err)
+				p.mu.Unlock()
+				http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			p.llama = llamacpp.NewServer(req.Model, entry, p.logger)
+			if err := p.llama.Start(r.Context()); err != nil {
+				p.logger.LogError("failed to start llama.cpp server", err)
+				p.mu.Unlock()
+				http.Error(w, fmt.Sprintf(`{"error":{"message":"failed to start local LLM: %s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusServiceUnavailable)
+				return
+			}
+		}
+		targetURL = p.llama.URL() + "/v1/chat/completions"
+		p.mu.Unlock()
 	}
 
-	// Rewrite model to the upstream model name, keeping other fields as-is
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil {
-		p.logger.LogError("failed to parse request body", err)
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	fields["model"], _ = json.Marshal(modelName)
-	body, err = json.Marshal(fields)
-	if err != nil {
-		p.logger.LogError("failed to encode upstream request body", err)
-		http.Error(w, "failed to encode upstream request body", http.StatusInternalServerError)
-		return
-	}
-
-	// Count messages from raw body (avoid parsing messages)
+	// Count messages from raw body
 	msgCount := 0
 	if idx := bytes.Index(body, []byte(`"messages"`)); idx >= 0 {
 		arrStart := bytes.Index(body[idx:], []byte("["))
@@ -129,25 +170,13 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Log request
 	p.logger.LogRequest(r.Method, r.URL.Path, req.Model, r.RemoteAddr)
 	p.logger.LogHeaders(r.Header)
 	p.logger.Info("request metadata",
-		slog.String("model", modelName),
-		slog.String("base_url", provider.BaseURL),
+		slog.String("target_url", targetURL),
 		slog.Int("messages", msgCount),
 		slog.Bool("stream", req.Stream),
 	)
-	// p.logger.Info("request body",
-	// 	slog.String("body", string(p.formatJSON(body))),
-	// )
-
-	// Build target URL
-	targetURL := provider.BaseURL
-	if !strings.HasSuffix(targetURL, "/") {
-		targetURL += "/"
-	}
-	targetURL += "v1/chat/completions"
 
 	httpReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -183,7 +212,13 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	// Set required headers
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	if modelType == "provider" {
+		if prov, ok := info["provider"].(string); ok {
+			if p, err := p.cfg.GetProvider(prov); err == nil {
+				httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+			}
+		}
+	}
 
 	// Execute request
 	httpResp, err := p.client.Do(httpReq)
