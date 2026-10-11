@@ -136,7 +136,12 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	case "llama.cpp":
 		p.mu.Lock()
-		if p.llama == nil {
+		if p.llama == nil || p.llama.Selector() != req.Model {
+			// Stop old server if running a different model
+			if p.llama != nil {
+				p.logger.Info("replacing llama.cpp server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
+				p.llama.Stop()
+			}
 			entry, err := p.cfg.GetLlamaCppEntry(req.Model)
 			if err != nil {
 				p.logger.LogError("failed to get llama.cpp config", err)

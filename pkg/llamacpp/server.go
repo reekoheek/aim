@@ -171,6 +171,11 @@ func (s *Server) URL() string {
 	return fmt.Sprintf("http://%s:%d", s.host, s.port)
 }
 
+// Selector returns the model selector for this server.
+func (s *Server) Selector() string {
+	return s.selector
+}
+
 // GetFlags returns the server flags for logging.
 func (s *Server) GetFlags() config.LlamaCppFlags {
 	return s.flags
