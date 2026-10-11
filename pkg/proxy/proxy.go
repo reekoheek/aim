@@ -134,24 +134,24 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 		targetURL = provider.BaseURL + "/v1/chat/completions"
 
-	case "llama.cpp":
+	case "llama-server":
 		p.mu.Lock()
 		if p.llama == nil || p.llama.Selector() != req.Model {
 			// Stop old server if running a different model
 			if p.llama != nil {
-				p.logger.Info("replacing llama.cpp server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
+				p.logger.Info("replacing llama server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
 				p.llama.Stop()
 			}
 			entry, err := p.cfg.GetLlamaCppEntry(req.Model)
 			if err != nil {
-				p.logger.LogError("failed to get llama.cpp config", err)
+				p.logger.LogError("failed to get llama server config", err)
 				p.mu.Unlock()
 				http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
 				return
 			}
 			p.llama = llamacpp.NewServer(req.Model, entry, p.logger)
 			if err := p.llama.Start(r.Context()); err != nil {
-				p.logger.LogError("failed to start llama.cpp server", err)
+				p.logger.LogError("failed to start llama server", err)
 				p.mu.Unlock()
 				http.Error(w, fmt.Sprintf(`{"error":{"message":"failed to start local LLM: %s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusServiceUnavailable)
 				return

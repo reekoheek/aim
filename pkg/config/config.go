@@ -87,7 +87,7 @@ func (c *Config) ResolveModel(selector string) (modelType string, info map[strin
 			"provider": entry.Provider,
 			"model":    entry.Model,
 		}, nil
-	case "llama.cpp":
+	case "llama-server":
 		info := map[string]any{
 			"bin":      entry.LlamaCpp.Bin,
 			"flags":    entry.LlamaCpp.Flags,
@@ -108,7 +108,7 @@ func (c *Config) ResolveModel(selector string) (modelType string, info map[strin
 			}
 			info["url"] = fmt.Sprintf("http://127.0.0.1:%d", port)
 		}
-		return "llama.cpp", info, nil
+		return "llama-server", info, nil
 	default:
 		return "", nil, fmt.Errorf("model %q has unsupported type %q", selector, entry.Type)
 	}
@@ -132,8 +132,8 @@ func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("model %q not found in config", selector)
 	}
-	if entry.Type != "llama.cpp" {
-		return nil, fmt.Errorf("model %q is not type llama.cpp", selector)
+	if entry.Type != "llama-server" {
+		return nil, fmt.Errorf("model %q is not type llama-server", selector)
 	}
 	if entry.LlamaCpp == nil {
 		return nil, fmt.Errorf("model %q has no llama.cpp config", selector)
@@ -228,7 +228,7 @@ func Load(path string) (*Config, error) {
 
 	// Parse llama.cpp entries from raw flags, merging with template if set
 	for id, entry := range cfg.Models {
-		if entry.Type == "llama.cpp" && entry.RawFlags != nil {
+		if entry.Type == "llama-server" && entry.RawFlags != nil {
 			llama := &LlamaCppEntry{Bin: "llama-server"}
 			if entry.Bin != "" {
 				llama.Bin = entry.Bin

@@ -105,7 +105,7 @@ func (s *Server) Start(ctx context.Context) error {
 			if strings.Contains(line, "using config file") {
 				continue
 			}
-			s.logger.Info("llama-server", slog.String("msg", line))
+			s.logger.Info(s.selector, slog.String("msg", line))
 		}
 	}()
 

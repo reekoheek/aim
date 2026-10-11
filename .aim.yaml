@@ -14,8 +14,7 @@ models:
     provider: banyu-minipc
     model: qwen3.6-35b
   local/qwen3.5-2b:
-    type: llama.cpp
-    bin: llama-server
+    type: llama-server
     flags:
       inherit: default
       hf: bartowski/Qwen_Qwen3.5-2B-GGUF:Q4_K_M
@@ -26,8 +25,7 @@ models:
       presence-penalty: 1.0
       repeat-penalty: 1.0
   local/lfm2.5-2.6b:
-    type: llama.cpp
-    bin: llama-server
+    type: llama-server
     flags:
       inherit: default
       hf: LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M
