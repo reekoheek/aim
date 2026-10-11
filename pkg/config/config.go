@@ -285,6 +285,15 @@ func Load(path string) (*Config, error) {
 				llama.URL = toString(urlRaw)
 			}
 
+			// Generate port from selector hash if not explicitly set
+			if llama.Flags.Port == 0 {
+				var h uint32
+				for _, b := range id {
+					h = 31*h + uint32(b)
+				}
+				llama.Flags.Port = 10000 + int(h%55536)
+			}
+
 			entry := cfg.Models[id]
 			entry.LlamaCpp = llama
 			cfg.Models[id] = entry

@@ -1,6 +1,7 @@
 package llamacpp
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
@@ -39,7 +40,7 @@ type Server struct {
 func NewServer(selector string, entry *config.LlamaCppEntry, l *logger.Logger) *Server {
 	return &Server{
 		bin:      entry.Bin,
-		port:     defaultPort,
+		port:     entry.Flags.Port,
 		host:     defaultHost,
 		flags:    entry.Flags,
 		selector: selector,
@@ -68,13 +69,14 @@ func (s *Server) Start(ctx context.Context) error {
 	args := []string{
 		"-hf", s.flags.HF,
 		"--host", s.host,
-		"--port", fmt.Sprintf("%d", s.port),
+		"--port", fmt.Sprintf("%d", s.flags.Port),
 		"--ctx-size", fmt.Sprintf("%d", s.flags.C),
 		"--flash-attn", s.flags.FA,
 		"--gpu-layers", fmt.Sprintf("%d", s.flags.NGL),
 		"--parallel", fmt.Sprintf("%d", s.flags.NP),
 		"--cache-type-k", s.flags.CTK,
 		"--cache-type-v", s.flags.CTV,
+		"--log-colors", "off",
 		"--temp", fmt.Sprintf("%f", s.flags.Temp),
 		"--top-p", fmt.Sprintf("%f", s.flags.TopP),
 		"--top-k", fmt.Sprintf("%d", s.flags.TopK),
@@ -90,7 +92,22 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.cmd = exec.CommandContext(context.Background(), binPath, args...)
 	s.cmd.Stdout = os.Stdout
-	s.cmd.Stderr = os.Stderr
+	stderr, err := s.cmd.StderrPipe()
+	if err != nil {
+		s.startErr = fmt.Errorf("stderr pipe: %w", err)
+		s.logger.LogError("stderr pipe", s.startErr)
+		return s.startErr
+	}
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "using config file") {
+				continue
+			}
+			s.logger.Info("llama-server", slog.String("msg", line))
+		}
+	}()
 
 	if err := s.cmd.Start(); err != nil {
 		s.startErr = fmt.Errorf("start llama.cpp server: %w", err)
