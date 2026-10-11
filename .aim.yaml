@@ -6,6 +6,7 @@ templates:
     c: 64000
     ctk: q8_0
     ctv: q4_0
+    cache-ram: 0
 
 models:
   banyu-minipc/qwen3.6-35b:
@@ -24,6 +25,15 @@ models:
       min-p: 0.0
       presence-penalty: 1.0
       repeat-penalty: 1.0
+  local/lfm2.5-2.6b:
+    type: llama.cpp
+    bin: llama-server
+    flags:
+      inherit: default
+      hf: LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M
+      temp: 0.1
+      top-k: 50
+      repeat-penalty: 1.1
 
 providers:
   banyu-minipc:
