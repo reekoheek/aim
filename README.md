@@ -41,6 +41,10 @@ providers:
 server:
   host: 0.0.0.0
   port: 8080
+  # Where llama-server saves per-session KV caches, keyed by the
+  # X-Session-Affinity header (default: $XDG_CACHE_HOME/aim/slots,
+  # i.e. ~/.cache/aim/slots)
+  # save_slot_path: /var/cache/aim/slots
 ```
 
 ## Usage

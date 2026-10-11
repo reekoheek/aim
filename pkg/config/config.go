@@ -53,8 +53,9 @@ type ProviderEntry struct {
 
 // ServerConfig holds the server listening configuration.
 type ServerConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host         string `yaml:"host"`
+	Port         int    `yaml:"port"`
+	SaveSlotPath string `yaml:"save_slot_path"`
 }
 
 // Config is the full application configuration.
@@ -161,6 +162,13 @@ func (c *Config) DefaultServer() ServerConfig {
 	}
 	if c.Server.Port == 0 {
 		c.Server.Port = 8080
+	}
+	// Session KV caches go to the user cache dir unless configured; without
+	// one, slot caching stays off.
+	if c.Server.SaveSlotPath == "" {
+		if dir, err := os.UserCacheDir(); err == nil {
+			c.Server.SaveSlotPath = filepath.Join(dir, "aim", "slots")
+		}
 	}
 	return c.Server
 }
