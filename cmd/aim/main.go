@@ -118,7 +118,7 @@ func run(cmd *cobra.Command, args []string) error {
 		defer cancel()
 		server.Shutdown(ctx)
 		// Stop llama-server so it does not outlive us holding its port.
-		p.Close()
+		p.Close(ctx)
 	}()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -46,8 +46,8 @@ type Server struct {
 	flags        config.LlamaCppFlags
 	selector     string
 	slotSavePath string
-	slotMu       sync.Mutex // serializes requests while slot caching is on
-	slotSession  string     // session currently loaded in CacheSlot, if known
+	slot         chan struct{} // held by one request at a time while slot caching is on
+	slotSession  string        // session currently loaded in CacheSlot, if known
 	cmd          *exec.Cmd
 	done         chan struct{} // closed once the process has exited
 	logger       *logger.Logger
@@ -65,6 +65,7 @@ func NewServer(selector string, entry *config.LlamaCppEntry, slotSavePath string
 		flags:        entry.Flags,
 		selector:     selector,
 		slotSavePath: slotSavePath,
+		slot:         make(chan struct{}, 1),
 		logger:       l,
 	}
 }
@@ -210,9 +211,19 @@ func (s *Server) waitReady(done <-chan struct{}) error {
 	}
 }
 
-// Stop stops the llama.cpp server process and waits for it to exit, killing
-// it if it does not stop within stopTimeout.
-func (s *Server) Stop() {
+// Stop waits for the request holding CacheSlot, including its pending slot
+// save, so neither is cut off, then stops the llama.cpp server process and
+// waits for it to exit, killing it if it does not stop within stopTimeout.
+// Once ctx is done it stops without waiting for the slot.
+func (s *Server) Stop(ctx context.Context) {
+	// The slot is kept, so requests still queued for it fail once the
+	// process has exited.
+	select {
+	case s.slot <- struct{}{}:
+	case <-s.done:
+	case <-ctx.Done():
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -271,13 +282,20 @@ func (s *Server) SlotCacheEnabled() bool {
 	return s.slotSavePath != ""
 }
 
-// AcquireSlot locks CacheSlot for one request and, for a non-empty sessionID,
-// restores the session's saved KV cache into it unless the slot already holds
-// it. The returned release must be called exactly once; with save true it
-// writes the slot back to the session's file before unlocking.
-func (s *Server) AcquireSlot(sessionID string) (release func(save bool)) {
+// AcquireSlot waits for CacheSlot until ctx is done or the server exits and,
+// for a non-empty sessionID, restores the session's saved KV cache into it
+// unless the slot already holds it. On success the returned release must be
+// called exactly once; with save true it writes the slot back to the
+// session's file before freeing it.
+func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release func(save bool), err error) {
 	start := time.Now()
-	s.slotMu.Lock()
+	select {
+	case s.slot <- struct{}{}:
+	case <-s.done:
+		return nil, fmt.Errorf("llama.cpp server has exited")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	acquired := time.Now()
 	s.logger.Info("slot acquired",
 		slog.Int("slot", CacheSlot),
@@ -285,19 +303,25 @@ func (s *Server) AcquireSlot(sessionID string) (release func(save bool)) {
 		slog.Duration("waited", acquired.Sub(start)),
 	)
 
-	if sessionID != "" && s.slotSession != sessionID {
-		s.restoreSlot(sessionID)
+	switch {
+	case sessionID == "":
+		// A session-less request may run on CacheSlot and overwrite it.
+		s.slotSession = ""
+	case s.slotSession != sessionID:
+		// The request is pinned to CacheSlot, so even if it fails the slot
+		// holds this session afterwards. A failed restore is retried.
+		if s.restoreSlot(sessionID) {
+			s.slotSession = sessionID
+		} else {
+			s.slotSession = ""
+		}
 	}
-	// Until the request completes the slot content is unknown.
-	s.slotSession = ""
 
 	return func(save bool) {
-		defer s.slotMu.Unlock()
+		defer func() { <-s.slot }()
 
 		saved := false
 		if save && sessionID != "" {
-			// The slot holds this session even if writing it to disk fails.
-			s.slotSession = sessionID
 			file := s.slotFile(sessionID)
 			if err := s.slotAction("save", file); err != nil {
 				s.logger.LogError("failed to save slot", err, slog.String("session", sessionID), slog.String("file", file))
@@ -312,18 +336,21 @@ func (s *Server) AcquireSlot(sessionID string) (release func(save bool)) {
 			slog.Bool("saved", saved),
 			slog.Duration("held", time.Since(acquired)),
 		)
-	}
+	}, nil
 }
 
-// restoreSlot loads the session's saved KV cache into CacheSlot, if any.
-func (s *Server) restoreSlot(sessionID string) {
+// restoreSlot loads the session's saved KV cache into CacheSlot, if any, and
+// reports false if loading it failed.
+func (s *Server) restoreSlot(sessionID string) bool {
 	file := s.slotFile(sessionID)
 	if _, err := os.Stat(filepath.Join(s.slotSavePath, file)); err != nil {
-		return
+		return true
 	}
 	if err := s.slotAction("restore", file); err != nil {
 		s.logger.LogError("failed to restore slot", err, slog.String("session", sessionID), slog.String("file", file))
+		return false
 	}
+	return true
 }
 
 // slotFile names the session's cache file. llama-server only accepts a bare

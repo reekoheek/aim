@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,13 +31,14 @@ func (p *Proxy) Llama() *llamacpp.Server {
 	return p.llama
 }
 
-// Close stops the llama.cpp server, if one is running.
-func (p *Proxy) Close() {
+// Close stops the llama.cpp server, if one is running, letting the request
+// holding its slot finish until ctx is done.
+func (p *Proxy) Close(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.llama != nil {
-		p.llama.Stop()
+		p.llama.Stop(ctx)
 		p.llama = nil
 	}
 }
@@ -141,6 +143,12 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	case "llama-server":
 		p.mu.Lock()
+		// The client may have left while a server start or swap held the lock;
+		// don't let it swap the model now.
+		if r.Context().Err() != nil {
+			p.mu.Unlock()
+			return
+		}
 		// A crashed server is dropped so the next request starts a new one.
 		if p.llama != nil && p.llama.Exited() {
 			p.logger.Info("llama server has exited", slog.String("model", p.llama.Selector()))
@@ -149,7 +157,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		// Stop old server if running a different model
 		if p.llama != nil && p.llama.Selector() != req.Model {
 			p.logger.Info("replacing llama server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
-			p.llama.Stop()
+			p.llama.Stop(context.Background())
 			p.llama = nil
 		}
 		if p.llama == nil {
@@ -176,10 +184,12 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		targetURL = llama.URL() + "/v1/chat/completions"
 	}
 
+	session := sessionID(r)
+
 	p.logger.LogRequest(r.Method, r.URL.Path, req.Model, r.RemoteAddr)
 	p.logger.Info("request metadata",
 		slog.String("target_url", targetURL),
-		slog.String("session", r.Header.Get("X-Session-Affinity")),
+		slog.String("session", session),
 		slog.Bool("stream", req.Stream),
 	)
 
@@ -188,18 +198,20 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// after the handler returns, so the client is not kept waiting for it.
 	saveSlot := false
 	if llama != nil && llama.SlotCacheEnabled() {
-		session := r.Header.Get("X-Session-Affinity")
-		release := llama.AcquireSlot(session)
+		release, err := llama.AcquireSlot(r.Context(), session)
+		if err != nil {
+			p.logger.LogError("failed to acquire slot", err, slog.String("session", session))
+			http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusServiceUnavailable)
+			return
+		}
 		defer func() { go release(saveSlot) }()
 
 		// Pin the request to the restored slot and reuse its cached prompt.
-		if session != "" {
-			var fields map[string]json.RawMessage
-			if err := json.Unmarshal(body, &fields); err == nil {
-				fields["id_slot"], _ = json.Marshal(llamacpp.CacheSlot)
-				fields["cache_prompt"], _ = json.Marshal(true)
-				body, _ = json.Marshal(fields)
-			}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err == nil {
+			fields["id_slot"], _ = json.Marshal(llamacpp.CacheSlot)
+			fields["cache_prompt"], _ = json.Marshal(true)
+			body, _ = json.Marshal(fields)
 		}
 	}
 
@@ -285,6 +297,19 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(httpResp.StatusCode)
 	w.Write(body)
 	saveSlot = httpResp.StatusCode/100 == 2
+}
+
+// noSession is the session of requests without X-Session-Affinity, so their
+// slot is cached too.
+const noSession = "-"
+
+// sessionID returns the request's X-Session-Affinity, or noSession if it has
+// none.
+func sessionID(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get("X-Session-Affinity")); id != "" {
+		return id
+	}
+	return noSession
 }
 
 // streamResponse forwards an SSE stream and reports whether it ran to the end.
