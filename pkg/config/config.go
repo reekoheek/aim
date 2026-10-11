@@ -30,8 +30,8 @@ type LlamaCppFlags struct {
 // LlamaCppEntry represents a local llama.cpp model configuration.
 type LlamaCppEntry struct {
 	Bin   string        `yaml:"bin"`
-	URL   string        `yaml:"url"` // explicit URL, overrides auto-generated
-	Flags LlamaCppFlags `yaml:"flags"`
+	URL   string        `yaml:"url"`      // explicit URL, overrides auto-generated
+	Flags LlamaCppFlags `yaml:"-"`        // populated during load (merged)
 }
 
 // ModelEntry represents a model configuration.
@@ -41,6 +41,8 @@ type ModelEntry struct {
 	Model      string          `yaml:"model"`
 	LlamaCpp   *LlamaCppEntry  `yaml:"-"` // populated during load
 	RawFlags   map[string]any  `yaml:"flags"`
+	Bin        string          `yaml:"bin"` // llama.cpp binary name
+	URL        string          `yaml:"url"` // explicit URL override
 }
 
 // ProviderEntry represents an LLM provider configuration.
@@ -57,9 +59,10 @@ type ServerConfig struct {
 
 // Config is the full application configuration.
 type Config struct {
-	Models    map[string]ModelEntry   `yaml:"models"`
+	Models    map[string]ModelEntry    `yaml:"models"`
 	Providers map[string]ProviderEntry `yaml:"providers"`
-	Server    ServerConfig            `yaml:"server"`
+	Templates map[string]LlamaCppFlags `yaml:"templates"`
+	Server    ServerConfig             `yaml:"server"`
 }
 
 // ResolveModel resolves a model selector to its type and info.
@@ -190,6 +193,14 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
+	// Parse templates
+	var templates map[string]LlamaCppFlags
+	if tplRaw, ok := rawCfg["templates"]; ok {
+		if tplBytes, err := yaml.Marshal(tplRaw); err == nil {
+			_ = yaml.Unmarshal(tplBytes, &templates)
+		}
+	}
+
 	// Parse server
 	var server ServerConfig
 	if srvRaw, ok := rawCfg["server"]; ok {
@@ -201,6 +212,7 @@ func Load(path string) (*Config, error) {
 	cfg := Config{
 		Models:    models,
 		Providers: providers,
+		Templates: templates,
 		Server:    server,
 	}
 
@@ -210,14 +222,28 @@ func Load(path string) (*Config, error) {
 	if cfg.Providers == nil {
 		cfg.Providers = make(map[string]ProviderEntry)
 	}
+	if cfg.Templates == nil {
+		cfg.Templates = make(map[string]LlamaCppFlags)
+	}
 
-	// Parse llama.cpp entries from raw flags
+	// Parse llama.cpp entries from raw flags, merging with template if set
 	for id, entry := range cfg.Models {
 		if entry.Type == "llama.cpp" && entry.RawFlags != nil {
 			llama := &LlamaCppEntry{Bin: "llama-server"}
-			if entry.RawFlags["bin"] != nil {
-				llama.Bin = fmt.Sprintf("%v", entry.RawFlags["bin"])
+			if entry.Bin != "" {
+				llama.Bin = entry.Bin
 			}
+			// Resolve inherit from flags (e.g. inherit: balanced)
+			if inheritRaw, ok := entry.RawFlags["inherit"]; ok {
+				templateName := toString(inheritRaw)
+				tpl, ok := cfg.Templates[templateName]
+				if !ok {
+					return nil, fmt.Errorf("template %q not found (used by model %q)", templateName, id)
+				}
+				// Start with template as base
+				llama.Flags = tpl
+			}
+			// Overlay model-level raw flags onto base (model wins for overlapping keys)
 			for k, v := range entry.RawFlags {
 				switch k {
 				case "ngl":
@@ -234,7 +260,7 @@ func Load(path string) (*Config, error) {
 					llama.Flags.CTV = toString(v)
 				case "hf":
 					llama.Flags.HF = toString(v)
-			case "port":
+				case "port":
 					llama.Flags.Port = toInt(v)
 				case "model":
 					llama.Flags.ModelPath = toString(v)
@@ -253,7 +279,9 @@ func Load(path string) (*Config, error) {
 				}
 			}
 			// Parse explicit URL if present
-			if urlRaw, ok := entry.RawFlags["url"]; ok {
+			if entry.URL != "" {
+				llama.URL = entry.URL
+			} else if urlRaw, ok := entry.RawFlags["url"]; ok {
 				llama.URL = toString(urlRaw)
 			}
 
