@@ -1,11 +1,25 @@
-# aim configuration
-# Find this file in CWD as .aim.yaml, or specify with -c flag
-
 models:
   banyu-minipc/qwen3.6-35b:
     type: provider
     provider: banyu-minipc
     model: qwen3.6-35b
+  local/qwen3.5-2b:
+    type: llama.cpp
+    bin: llama-server
+    flags:
+      ngl: 999
+      fa: on
+      np: 1
+      c: 64000
+      ctk: q8_0
+      ctv: q4_0
+      hf: bartowski/Qwen_Qwen3.5-2B-GGUF:Q4_K_M
+      temp: 0.4
+      top-p: 0.95
+      top-k: 20
+      min-p: 0.0
+      presence-penalty: 1.0
+      repeat-penalty: 1.0
 
 providers:
   banyu-minipc:
