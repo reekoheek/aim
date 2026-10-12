@@ -36,7 +36,11 @@ providers:
 server:
   host: 0.0.0.0
   port: 8080
+  save_slot_path: /var/cache/aim/slots # optional, default: <user cache dir>/aim/slots
+  slot_expiration: 1h                  # optional, default: 1h
 ```
+
+Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path`. Files not saved for longer than `slot_expiration` (a Go duration such as `1h`, `90m`) are deleted on startup and then periodically (every `slot_expiration`, at most hourly).
 
 ### Local llama-server models
 

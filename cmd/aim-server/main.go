@@ -15,6 +15,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/llamacpp"
 	"github.com/reekoheek/aim/pkg/proxy"
 )
 
@@ -104,6 +105,16 @@ func run(cmd *cobra.Command, args []string) error {
 
 	absPath, _ := filepath.Abs(cfgPath)
 	l.Info("config loaded", slog.String("path", absPath))
+
+	slotExpiryCtx, stopSlotExpiry := context.WithCancel(context.Background())
+	defer stopSlotExpiry()
+	if serverCfg.SaveSlotPath != "" {
+		l.Info("slot cache expiration",
+			slog.String("dir", serverCfg.SaveSlotPath),
+			slog.Duration("expiration", serverCfg.SlotExpiration),
+		)
+		go llamacpp.ExpireSlots(slotExpiryCtx, serverCfg.SaveSlotPath, serverCfg.SlotExpiration, l)
+	}
 
 	// Setup signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
