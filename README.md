@@ -38,6 +38,47 @@ server:
   port: 8080
 ```
 
+### Local llama-server models
+
+A `llama-server` model is started on demand (one at a time). In its `flags`, every key that starts with `-` is a llama-server flag written exactly as on the command line, and is passed as-is:
+
+- `-hf: org/repo` → `-hf org/repo`, `--temp: 0.6` → `--temp 0.6`
+- `true` adds a switch on its own (`--jinja: true` → `--jinja`), `false` leaves it out; `-fa: on` stays `-fa on`
+- flags are passed sorted by name; when a flag appears twice (e.g. `-c` and `--ctx-size`), llama-server uses the last one
+
+Keys without a dash are aim settings:
+
+- `inherit: <template>` starts from a template under `templates`; the model's flags and settings win
+- `port`, `url` — where aim runs and reaches llama-server
+- `stop-timeout` — seconds aim waits for llama-server to stop before killing it (default 5)
+
+`--host`, `--port`, `--log-colors` and `--slot-save-path` are always set by aim.
+
+```yaml
+templates:
+  default:
+    -ngl: 999
+    -fa: on
+    -c: 128000
+    --jinja: true
+    --offline: true
+    stop-timeout: 30
+
+models:
+  qwen3.6-35b:
+    type: llama-server
+    bin: /path/to/llama-server   # optional, default: llama-server from PATH
+    flags:
+      inherit: default
+      --spec-type: draft-mtp
+      -hf: byteshape/Qwen3.6-35B-A3B-MTP-GGUF
+      -hff: Qwen3.6-35B-A3B-IQ4_XS-4.19bpw.gguf
+      --temp: 0.6
+      --top-k: 20
+```
+
+llama-server itself also applies the `[*]` section of `~/.config/llama.cpp/config.ini` (or `$XDG_CONFIG_HOME/llama.cpp/config.ini`, `/etc/llama.cpp/config.ini`) to every run, including the ones aim starts.
+
 ## Usage
 
 ### Proxy endpoint
