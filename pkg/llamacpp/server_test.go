@@ -121,7 +121,7 @@ func TestServerArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", tt.entry, "", nil).args()
+			got := NewServer("m", tt.entry, config.ServerConfig{}, nil).args()
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
@@ -141,7 +141,7 @@ func TestNewServerStopTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, "", nil).stopTimeout
+			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil).stopTimeout
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
@@ -174,7 +174,13 @@ func (f *fakeSlotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case action == "restore" && f.failRestore[body.Filename]:
 		http.Error(w, "restore failed", http.StatusInternalServerError)
 	case action == "save":
-		if err := os.WriteFile(filepath.Join(f.dir, body.Filename), []byte("kv"), 0o644); err != nil {
+		path := filepath.Join(f.dir, body.Filename)
+		if err := os.WriteFile(path, []byte("kv"), 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		savedAt := time.Now()
+		if err := os.Chtimes(path, savedAt, savedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -195,7 +201,7 @@ type slotRequest struct {
 	keep    bool
 }
 
-func newSlotTestServer(t *testing.T, existing []string, failRestore []string, stopTimeout time.Duration) (*Server, *fakeSlotServer) {
+func newSlotTestServer(t *testing.T, existing []string, failRestore []string, stopTimeout time.Duration, maxFiles int) (*Server, *fakeSlotServer) {
 	t.Helper()
 	dir := t.TempDir()
 	fake := &fakeSlotServer{dir: dir, failRestore: map[string]bool{}}
@@ -206,7 +212,8 @@ func newSlotTestServer(t *testing.T, existing []string, failRestore []string, st
 		Port:        httpServer.Listener.Addr().(*net.TCPAddr).Port,
 		StopTimeout: stopTimeout,
 	}
-	srv := NewServer("m", entry, dir, logger.New("ERROR"))
+	server := config.ServerConfig{SaveSlotPath: dir, SlotExpiration: time.Hour, SlotMaxFiles: maxFiles}
+	srv := NewServer("m", entry, server, logger.New("ERROR"))
 	for _, session := range existing {
 		if err := os.WriteFile(filepath.Join(dir, srv.slotFile(session)), []byte("kv"), 0o644); err != nil {
 			t.Fatal(err)
@@ -288,10 +295,60 @@ func TestAcquireSlotSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newSlotTestServer(t, tt.existing, tt.failRestore, 0)
+			srv, fake := newSlotTestServer(t, tt.existing, tt.failRestore, 0, 0)
 			runSlotRequests(t, srv, tt.requests)
 			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
 				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestAcquireSlotKeepsRecentlyUsedSlotFiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		maxFiles  int
+		requests  []slotRequest
+		want      []string
+		wantFiles []string
+	}{
+		{
+			name:      "least recently used session removed over the limit",
+			maxFiles:  2,
+			requests:  []slotRequest{{"a", true}, {"b", true}, {"c", true}, {"d", true}},
+			want:      []string{"save a", "save b", "save c"},
+			wantFiles: []string{"b", "c"},
+		},
+		{
+			name:      "requested session counts as used before the limit is applied",
+			maxFiles:  2,
+			requests:  []slotRequest{{"a", true}, {"b", true}, {"c", true}, {"a", true}},
+			want:      []string{"save a", "save b", "save c", "restore a"},
+			wantFiles: []string{"a", "c"},
+		},
+		{
+			name:      "requested session is restored before the limit is applied",
+			maxFiles:  1,
+			requests:  []slotRequest{{"a", true}, {"b", true}, {"a", true}},
+			want:      []string{"save a", "save b", "restore a"},
+			wantFiles: []string{"b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, fake := newSlotTestServer(t, nil, nil, 0, tt.maxFiles)
+			runSlotRequests(t, srv, tt.requests)
+			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
+				t.Errorf("actions %q, want %q", got, want)
+			}
+			var wantFiles []string
+			for _, session := range tt.wantFiles {
+				wantFiles = append(wantFiles, srv.slotFile(session))
+			}
+			slices.Sort(wantFiles)
+			if got := remainingNames(t, srv.slotSavePath); !slices.Equal(got, wantFiles) {
+				t.Errorf("files %q, want %q", got, wantFiles)
 			}
 		})
 	}
@@ -345,7 +402,7 @@ func TestStopSavesUnsavedSlot(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newSlotTestServer(t, nil, nil, time.Second)
+			srv, fake := newSlotTestServer(t, nil, nil, time.Second, 0)
 			startHelperProcess(t, srv)
 			runSlotRequests(t, srv, tt.requests)
 			srv.Stop(context.Background())

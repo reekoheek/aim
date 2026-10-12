@@ -42,36 +42,40 @@ var slotClient = &http.Client{Timeout: time.Minute}
 
 // Server manages a llama.cpp server process.
 type Server struct {
-	bin          string
-	port         int
-	host         string
-	flags        map[string]any
-	stopTimeout  time.Duration
-	selector     string
-	slotSavePath string
-	slot         chan struct{} // held by one request at a time while slot caching is on
-	slotSession  string        // session currently loaded in CacheSlot, if known
-	slotUnsaved  bool
-	cmd          *exec.Cmd
-	done         chan struct{} // closed once the process has exited
-	logger       *logger.Logger
-	mu           sync.Mutex
-	started      bool
-	startErr     error
+	bin            string
+	port           int
+	host           string
+	flags          map[string]any
+	stopTimeout    time.Duration
+	selector       string
+	slotSavePath   string
+	slotExpiration time.Duration
+	slotMaxFiles   int
+	slot           chan struct{} // held by one request at a time while slot caching is on
+	slotSession    string        // session currently loaded in CacheSlot, if known
+	slotUnsaved    bool
+	cmd            *exec.Cmd
+	done           chan struct{} // closed once the process has exited
+	logger         *logger.Logger
+	mu             sync.Mutex
+	started        bool
+	startErr       error
 }
 
 // NewServer creates a new llama.cpp server manager.
-func NewServer(selector string, entry *config.LlamaCppEntry, slotSavePath string, l *logger.Logger) *Server {
+func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) *Server {
 	return &Server{
-		bin:          entry.Bin,
-		port:         entry.Port,
-		host:         defaultHost,
-		flags:        entry.Flags,
-		stopTimeout:  cmp.Or(entry.StopTimeout, defaultStopTimeout),
-		selector:     selector,
-		slotSavePath: slotSavePath,
-		slot:         make(chan struct{}, 1),
-		logger:       l,
+		bin:            entry.Bin,
+		port:           entry.Port,
+		host:           defaultHost,
+		flags:          entry.Flags,
+		stopTimeout:    cmp.Or(entry.StopTimeout, defaultStopTimeout),
+		selector:       selector,
+		slotSavePath:   server.SaveSlotPath,
+		slotExpiration: server.SlotExpiration,
+		slotMaxFiles:   server.SlotMaxFiles,
+		slot:           make(chan struct{}, 1),
+		logger:         l,
 	}
 }
 
@@ -209,6 +213,7 @@ func (s *Server) Stop(ctx context.Context) {
 	case s.slot <- struct{}{}:
 		if s.done != nil && !s.Exited() {
 			s.saveUnsavedSlot()
+			s.pruneSlotFiles()
 		}
 	case <-s.done:
 	case <-ctx.Done():
@@ -318,11 +323,13 @@ func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release fun
 	)
 
 	if s.slotSession != sessionID {
+		s.markSlotUsed(sessionID)
 		s.saveUnsavedSlot()
 		s.slotSession = ""
 		if sessionID != "" && s.restoreSlot(sessionID) {
 			s.slotSession = sessionID
 		}
+		s.pruneSlotFiles()
 	}
 
 	return func(keep bool) {
@@ -347,10 +354,25 @@ func (s *Server) saveUnsavedSlot() {
 		return
 	}
 	file := s.slotFile(s.slotSession)
+	s.slotUnsaved = false
 	if err := s.slotAction("save", file); err != nil {
 		s.logger.LogError("failed to save slot", err, slog.String("session", s.slotSession), slog.String("file", file))
 	}
-	s.slotUnsaved = false
+}
+
+func (s *Server) pruneSlotFiles() {
+	pruned, err := pruneSlots(s.slotSavePath, s.slotExpiration, s.slotMaxFiles, time.Now())
+	logPrunedSlots(s.logger, s.slotSavePath, pruned, err)
+}
+
+func (s *Server) markSlotUsed(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	file := s.slotFile(sessionID)
+	if err := touchSlotFile(filepath.Join(s.slotSavePath, file), time.Now()); err != nil {
+		s.logger.LogError("failed to mark slot cache as used", err, slog.String("session", sessionID), slog.String("file", file))
+	}
 }
 
 // restoreSlot loads the session's saved KV cache into CacheSlot, if any, and

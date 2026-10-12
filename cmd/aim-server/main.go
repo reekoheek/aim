@@ -106,14 +106,15 @@ func run(cmd *cobra.Command, args []string) error {
 	absPath, _ := filepath.Abs(cfgPath)
 	l.Info("config loaded", slog.String("path", absPath))
 
-	slotExpiryCtx, stopSlotExpiry := context.WithCancel(context.Background())
-	defer stopSlotExpiry()
+	slotPruneCtx, stopSlotPrune := context.WithCancel(context.Background())
+	defer stopSlotPrune()
 	if serverCfg.SaveSlotPath != "" {
-		l.Info("slot cache expiration",
+		l.Info("slot cache limits",
 			slog.String("dir", serverCfg.SaveSlotPath),
 			slog.Duration("expiration", serverCfg.SlotExpiration),
+			slog.Int("max_files", serverCfg.SlotMaxFiles),
 		)
-		go llamacpp.ExpireSlots(slotExpiryCtx, serverCfg.SaveSlotPath, serverCfg.SlotExpiration, l)
+		go llamacpp.PruneSlots(slotPruneCtx, serverCfg, l)
 	}
 
 	// Setup signal handling for graceful shutdown

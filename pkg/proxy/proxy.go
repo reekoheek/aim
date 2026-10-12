@@ -168,8 +168,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusInternalServerError)
 				return
 			}
-			slotSavePath := p.cfg.DefaultServer().SaveSlotPath
-			srv := llamacpp.NewServer(req.Model, entry, slotSavePath, p.logger)
+			srv := llamacpp.NewServer(req.Model, entry, p.cfg.DefaultServer(), p.logger)
 			// Only keep a server that started, so a failed start is retried.
 			if err := srv.Start(r.Context()); err != nil {
 				p.logger.LogError("failed to start llama server", err)
