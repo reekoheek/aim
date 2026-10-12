@@ -415,3 +415,36 @@ func TestStopSavesUnsavedSlot(t *testing.T) {
 		})
 	}
 }
+
+func TestSlotFileNormalizesUnsafeCharacters(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"simple", "simple.bin"},
+		{"with slash", "with--slash.bin"},
+		{"with backslash", "with--backslash.bin"},
+		{"with spaces", "with--spaces.bin"},
+		{"with colon", "with--colon.bin"},
+		{"a.b.c", "a.b.c.bin"},
+		{"with unicode ñ", "with--unicode--.bin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := &Server{}
+			if got := srv.slotFile(tt.name); got != tt.want {
+				t.Errorf("slotFile(%q) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeFileNameStaysPathSafe(t *testing.T) {
+	for _, id := range []string{"a/b", "a\\b", "../escape", "a b/c", "hijau:12"} {
+		name := sanitizeFileName(id)
+		if strings.ContainsAny(name, `/\`) {
+			t.Errorf("sanitizeFileName(%q) = %q still contains path separators", id, name)
+		}
+	}
+}

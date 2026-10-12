@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -390,11 +389,18 @@ func (s *Server) restoreSlot(sessionID string) bool {
 }
 
 // slotFile names the session's cache file. llama-server only accepts a bare
-// filename relative to --slot-save-path, and a cache is only valid for the
-// model that produced it, so the name hashes both.
+// filename relative to --slot-save-path, so the session ID is normalized to a
+// safe charset; characters that would break the path become "--". Each session
+// always uses the same model, so the model is not part of the name.
 func (s *Server) slotFile(sessionID string) string {
-	sum := sha256.Sum256([]byte(s.selector + "\x00" + sessionID))
-	return hex.EncodeToString(sum[:16]) + ".bin"
+	return sanitizeFileName(sessionID) + ".bin"
+}
+
+var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// sanitizeFileName maps any character that is unsafe in a filename to "--".
+func sanitizeFileName(id string) string {
+	return unsafeFileNameChars.ReplaceAllString(id, "--")
 }
 
 // slotAction runs a save/restore/erase action on CacheSlot.
