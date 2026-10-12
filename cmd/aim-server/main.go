@@ -31,7 +31,7 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "aim",
+		Use:   "aim-server",
 		Short: "aim — an LLM proxy server",
 		Long:  "aim is a lightweight LLM proxy server that forwards requests to OpenAI-compatible APIs.",
 		RunE:  run,

@@ -1,18 +1,13 @@
 # aim
 
-Lightweight LLM proxy server in Go. Forwards requests to OpenAI-compatible APIs with multi-model support.
+AI Management Server — lightweight LLM proxy with multi-model support. Forwards requests to OpenAI-compatible APIs.
 
 ## Quick Start
 
 ```bash
-# Build
-go build -o bin/aim ./cmd/aim/
-
-# Run (auto-loads .aim.yaml from CWD)
-./bin/aim
-
-# Run with custom config
-./bin/aim -c path/to/config.yaml
+go build -o bin/aim-server ./cmd/aim-server/
+./bin/aim-server          # loads .aim.yaml from CWD
+./bin/aim-server -c path/to/config.yaml
 ```
 
 ## Configuration
@@ -41,10 +36,6 @@ providers:
 server:
   host: 0.0.0.0
   port: 8080
-  # Where llama-server saves per-session KV caches, keyed by the
-  # X-Session-Affinity header (default: $XDG_CACHE_HOME/aim/slots,
-  # i.e. ~/.cache/aim/slots)
-  # save_slot_path: /var/cache/aim/slots
 ```
 
 ## Usage
@@ -52,22 +43,9 @@ server:
 ### Proxy endpoint
 
 ```bash
-# Non-streaming
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "banyu-minipc/qwen3.6-35b",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-
-# Streaming
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -N -d '{
-    "model": "banyu-minipc/qwen3.6-35b",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
+  -d '{"model": "banyu-minipc/qwen3.6-35b", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 ### With OpenAI SDK (Python)
@@ -75,21 +53,13 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://localhost:8080/v1",
-    api_key="any-value"  # not used, proxy handles auth
-)
-
-response = client.chat.completions.create(
-    model="banyu-minipc/qwen3.6-35b",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True
-)
-
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="any-value")
+response = client.chat.completions.create(model="banyu-minipc/qwen3.6-35b", messages=[{"role": "user", "content": "Hello!"}], stream=True)
 ```
+
+## Platform
+
+Native support for **Linux**, **macOS**, and **Windows**. Pure Go, no `cgo`, no OS-specific dependencies.
 
 ## CLI Flags
 
@@ -99,23 +69,12 @@ for chunk in response:
 | `-v, --version` | Show version |
 | `-h, --help` | Show help |
 
-## Logging
-
-Logs are human-readable with timestamp, level, message, and attributes:
-
-```
-[2026-10-11T01:03:17.912] [INFO] request method=POST path=/v1/chat/completions model=banyu-minipc/qwen3.6-35b remote_addr=[::1]:38464
-[2026-10-11T01:03:17.923] [INFO] response status=200 duration=1.234s
-```
-
 ## Structure
 
 ```
 aim/
-├── go.mod
-├── .aim.yaml
-├── cmd/aim/main.go          # Entry point (cobra CLI)
-├── pkg/config/config.go     # YAML config loader
-├── pkg/proxy/proxy.go       # HTTP handler + streaming
-└── internal/logger/logger.go # Logging utility
+├── cmd/aim-server/main.go          # Entry point
+├── pkg/config/config.go            # YAML config loader
+├── pkg/proxy/proxy.go              # HTTP handler + streaming
+└── internal/logger/logger.go       # Logging utility
 ```

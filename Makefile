@@ -20,7 +20,7 @@ VERSION := $(shell \
 	fi)
 
 build:
-	go build -ldflags "-X main.version=$(VERSION)" -o bin/aim ./cmd/aim
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/aim-server ./cmd/aim-server
 
 test:
 	go vet ./... && go test ./...
@@ -33,4 +33,4 @@ coverage-html: coverage
 	go tool cover -html=$(COVERAGE_FILE) -o $(COVERAGE_HTML)
 
 clean:
-	rm -f bin/aim $(COVERAGE_FILE) $(COVERAGE_HTML)
+	rm -f bin/aim-server $(COVERAGE_FILE) $(COVERAGE_HTML)
