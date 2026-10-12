@@ -281,7 +281,10 @@ func (s *Server) GetFlags() map[string]any {
 }
 
 func (s *Server) args() []string {
-	return append(flagArgs(s.flags),
+	return append(append([]string{
+		"--offline",
+		"--no-cors-credentials",
+	}, flagArgs(s.flags)...),
 		"--host", s.host,
 		"--port", strconv.Itoa(s.port),
 		"--log-colors", "off",
