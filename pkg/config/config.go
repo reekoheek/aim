@@ -1,48 +1,64 @@
 package config
 
 import (
+	"bytes"
+	"cmp"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// LlamaCppFlags holds llama.cpp server flags.
+const (
+	defaultLlamaServerBin = "llama-server"
+	firstSelectorPort     = 10000
+	selectorPortRange     = 55536
+)
+
 type LlamaCppFlags struct {
-	NGL             int     `yaml:"ngl"`
-	FA              string  `yaml:"fa"`
-	NP              int     `yaml:"np"`
-	C               int     `yaml:"c"`
-	CTK             string  `yaml:"ctk"`
-	CTV             string  `yaml:"ctv"`
-	HF              string  `yaml:"hf"`
-	ModelPath       string  `yaml:"model"`
-	Port            int     `yaml:"port"`
-	Temp            float64 `yaml:"temp"`
-	TopP            float64 `yaml:"top-p"`
-	TopK            int     `yaml:"top-k"`
-	MinP            float64 `yaml:"min-p"`
-	PresencePenalty float64 `yaml:"presence-penalty"`
-	RepeatPenalty   float64 `yaml:"repeat-penalty"`
+	Inherit     string         `yaml:"inherit"`
+	Port        int            `yaml:"port"`
+	URL         string         `yaml:"url"`
+	StopTimeout int            `yaml:"stop-timeout"`
+	Args        map[string]any `yaml:",inline"`
 }
 
-// LlamaCppEntry represents a local llama.cpp model configuration.
+func (f LlamaCppFlags) overlay(top LlamaCppFlags) LlamaCppFlags {
+	merged := LlamaCppFlags{
+		Inherit:     cmp.Or(top.Inherit, f.Inherit),
+		Port:        cmp.Or(top.Port, f.Port),
+		URL:         cmp.Or(top.URL, f.URL),
+		StopTimeout: cmp.Or(top.StopTimeout, f.StopTimeout),
+		Args:        make(map[string]any, len(f.Args)+len(top.Args)),
+	}
+	maps.Copy(merged.Args, f.Args)
+	maps.Copy(merged.Args, top.Args)
+	return merged
+}
+
 type LlamaCppEntry struct {
-	Bin   string        `yaml:"bin"`
-	URL   string        `yaml:"url"`      // explicit URL, overrides auto-generated
-	Flags LlamaCppFlags `yaml:"-"`        // populated during load (merged)
+	Bin         string
+	URL         string
+	Port        int
+	StopTimeout time.Duration
+	Flags       map[string]any
 }
 
 // ModelEntry represents a model configuration.
 type ModelEntry struct {
-	Type       string          `yaml:"type"`
-	Provider   string          `yaml:"provider"`
-	Model      string          `yaml:"model"`
-	LlamaCpp   *LlamaCppEntry  `yaml:"-"` // populated during load
-	RawFlags   map[string]any  `yaml:"flags"`
-	Bin        string          `yaml:"bin"` // llama.cpp binary name
-	URL        string          `yaml:"url"` // explicit URL override
+	Type     string         `yaml:"type"`
+	Provider string         `yaml:"provider"`
+	Model    string         `yaml:"model"`
+	LlamaCpp *LlamaCppEntry `yaml:"-"` // populated during load
+	Flags    LlamaCppFlags  `yaml:"flags"`
+	Bin      string         `yaml:"bin"` // llama.cpp binary name
+	URL      string         `yaml:"url"` // explicit URL override
 }
 
 // ProviderEntry represents an LLM provider configuration.
@@ -89,27 +105,16 @@ func (c *Config) ResolveModel(selector string) (modelType string, info map[strin
 			"model":    entry.Model,
 		}, nil
 	case "llama-server":
-		info := map[string]any{
+		url := entry.LlamaCpp.URL
+		if url == "" {
+			url = fmt.Sprintf("http://127.0.0.1:%d", entry.LlamaCpp.Port)
+		}
+		return "llama-server", map[string]any{
 			"bin":      entry.LlamaCpp.Bin,
 			"flags":    entry.LlamaCpp.Flags,
 			"selector": selector,
-		}
-		// Resolve URL: explicit url > auto-generated from port
-		if entry.LlamaCpp.URL != "" {
-			info["url"] = entry.LlamaCpp.URL
-		} else {
-			port := entry.LlamaCpp.Flags.Port
-			if port == 0 {
-				// Generate port from selector hash (range 10000-65535)
-				var h uint32
-				for _, b := range selector {
-					h = 31*h + uint32(b)
-				}
-				port = 10000 + int(h%55536)
-			}
-			info["url"] = fmt.Sprintf("http://127.0.0.1:%d", port)
-		}
-		return "llama-server", info, nil
+			"url":      url,
+		}, nil
 	default:
 		return "", nil, fmt.Errorf("model %q has unsupported type %q", selector, entry.Type)
 	}
@@ -180,48 +185,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	var rawCfg map[string]any
-	if err := yaml.Unmarshal(data, &rawCfg); err != nil {
+	var cfg Config
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
-	}
-
-	// Parse providers
-	var providers map[string]ProviderEntry
-	if provRaw, ok := rawCfg["providers"]; ok {
-		if provBytes, err := yaml.Marshal(provRaw); err == nil {
-			_ = yaml.Unmarshal(provBytes, &providers)
-		}
-	}
-
-	// Parse models
-	var models map[string]ModelEntry
-	if modRaw, ok := rawCfg["models"]; ok {
-		if modBytes, err := yaml.Marshal(modRaw); err == nil {
-			_ = yaml.Unmarshal(modBytes, &models)
-		}
-	}
-
-	// Parse templates
-	var templates map[string]LlamaCppFlags
-	if tplRaw, ok := rawCfg["templates"]; ok {
-		if tplBytes, err := yaml.Marshal(tplRaw); err == nil {
-			_ = yaml.Unmarshal(tplBytes, &templates)
-		}
-	}
-
-	// Parse server
-	var server ServerConfig
-	if srvRaw, ok := rawCfg["server"]; ok {
-		if srvBytes, err := yaml.Marshal(srvRaw); err == nil {
-			_ = yaml.Unmarshal(srvBytes, &server)
-		}
-	}
-
-	cfg := Config{
-		Models:    models,
-		Providers: providers,
-		Templates: templates,
-		Server:    server,
 	}
 
 	if cfg.Models == nil {
@@ -234,122 +202,52 @@ func Load(path string) (*Config, error) {
 		cfg.Templates = make(map[string]LlamaCppFlags)
 	}
 
-	// Parse llama.cpp entries from raw flags, merging with template if set
 	for id, entry := range cfg.Models {
-		if entry.Type == "llama-server" && entry.RawFlags != nil {
-			llama := &LlamaCppEntry{Bin: "llama-server"}
-			if entry.Bin != "" {
-				llama.Bin = entry.Bin
-			}
-			// Resolve inherit from flags (e.g. inherit: balanced)
-			if inheritRaw, ok := entry.RawFlags["inherit"]; ok {
-				templateName := toString(inheritRaw)
-				tpl, ok := cfg.Templates[templateName]
-				if !ok {
-					return nil, fmt.Errorf("template %q not found (used by model %q)", templateName, id)
-				}
-				// Start with template as base
-				llama.Flags = tpl
-			}
-			// Overlay model-level raw flags onto base (model wins for overlapping keys)
-			for k, v := range entry.RawFlags {
-				switch k {
-				case "ngl":
-					llama.Flags.NGL = toInt(v)
-				case "fa":
-					llama.Flags.FA = toString(v)
-				case "np":
-					llama.Flags.NP = toInt(v)
-				case "c":
-					llama.Flags.C = toInt(v)
-				case "ctk":
-					llama.Flags.CTK = toString(v)
-				case "ctv":
-					llama.Flags.CTV = toString(v)
-				case "hf":
-					llama.Flags.HF = toString(v)
-				case "port":
-					llama.Flags.Port = toInt(v)
-				case "model":
-					llama.Flags.ModelPath = toString(v)
-				case "temp":
-					llama.Flags.Temp = toFloat(v)
-				case "top-p":
-					llama.Flags.TopP = toFloat(v)
-				case "top-k":
-					llama.Flags.TopK = toInt(v)
-				case "min-p":
-					llama.Flags.MinP = toFloat(v)
-				case "presence-penalty":
-					llama.Flags.PresencePenalty = toFloat(v)
-				case "repeat-penalty":
-					llama.Flags.RepeatPenalty = toFloat(v)
-				}
-			}
-			// Parse explicit URL if present
-			if entry.URL != "" {
-				llama.URL = entry.URL
-			} else if urlRaw, ok := entry.RawFlags["url"]; ok {
-				llama.URL = toString(urlRaw)
-			}
-
-			// Generate port from selector hash if not explicitly set
-			if llama.Flags.Port == 0 {
-				var h uint32
-				for _, b := range id {
-					h = 31*h + uint32(b)
-				}
-				llama.Flags.Port = 10000 + int(h%55536)
-			}
-
-			entry := cfg.Models[id]
-			entry.LlamaCpp = llama
-			cfg.Models[id] = entry
+		if entry.Type != "llama-server" {
+			continue
 		}
+		llama, err := cfg.newLlamaCppEntry(id, entry)
+		if err != nil {
+			return nil, err
+		}
+		entry.LlamaCpp = llama
+		cfg.Models[id] = entry
 	}
 
 	return &cfg, nil
 }
 
-func toInt(v any) int {
-	switch val := v.(type) {
-	case int:
-		return val
-	case int64:
-		return int(val)
-	case float64:
-		return int(val)
-	case string:
-		var n int
-		fmt.Sscanf(val, "%d", &n)
-		return n
+func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppEntry, error) {
+	flags := entry.Flags
+	if flags.Inherit != "" {
+		template, ok := c.Templates[flags.Inherit]
+		if !ok {
+			return nil, fmt.Errorf("template %q not found (used by model %q)", flags.Inherit, selector)
+		}
+		flags = template.overlay(flags)
 	}
-	return 0
+	for name := range flags.Args {
+		if !strings.HasPrefix(name, "-") {
+			return nil, fmt.Errorf("model %q: unknown setting %q (llama-server flags start with - or --)", selector, name)
+		}
+	}
+
+	llama := &LlamaCppEntry{
+		Bin:         cmp.Or(entry.Bin, defaultLlamaServerBin),
+		URL:         cmp.Or(entry.URL, flags.URL),
+		Port:        cmp.Or(flags.Port, portFromSelector(selector)),
+		StopTimeout: time.Duration(flags.StopTimeout) * time.Second,
+		Flags:       flags.Args,
+	}
+	return llama, nil
 }
 
-func toString(v any) string {
-	switch val := v.(type) {
-	case string:
-		return val
-	case fmt.Stringer:
-		return val.String()
-	default:
-		return fmt.Sprintf("%v", v)
+func portFromSelector(selector string) int {
+	var hash uint32
+	for _, b := range selector {
+		hash = 31*hash + uint32(b)
 	}
-}
-
-func toFloat(v any) float64 {
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int:
-		return float64(val)
-	case string:
-		var f float64
-		fmt.Sscanf(val, "%f", &f)
-		return f
-	}
-	return 0
+	return firstSelectorPort + int(hash%selectorPortRange)
 }
 
 // FindConfig searches for .aim.yaml starting from the given directory.
