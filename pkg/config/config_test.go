@@ -26,9 +26,9 @@ func TestLlamaCppFlagsOverlay(t *testing.T) {
 	}{
 		{
 			name: "empty top keeps base",
-			base: LlamaCppFlags{StopTimeout: 30, Args: map[string]any{"-ngl": 999}},
+			base: LlamaCppFlags{Args: map[string]any{"-ngl": 999}},
 			top:  LlamaCppFlags{},
-			want: LlamaCppFlags{StopTimeout: 30, Args: map[string]any{"-ngl": 999}},
+			want: LlamaCppFlags{Args: map[string]any{"-ngl": 999}},
 		},
 		{
 			name: "top wins and adds",
@@ -147,8 +147,9 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Bin:  "llama-server",
-				Port: portFromSelector("m"),
+				Bin:         "llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
 				Flags: map[string]any{
 					"-ngl":      999,
 					"-fa":       "on",
@@ -179,20 +180,22 @@ models:
 `,
 			selector: "b",
 			want: &LlamaCppEntry{
-				Bin:   "llama-server",
-				Port:  portFromSelector("b"),
-				Flags: map[string]any{"--temp": 0.6},
+				Bin:         "llama-server",
+				Port:        portFromSelector("b"),
+				StopTimeout: 30 * time.Second,
+				Flags:       map[string]any{"--temp": 0.6},
 			},
 		},
 		{
-			name: "port, url and stop-timeout are read by aim, not passed as flags",
+			name: "stop_timeout is read by aim, not passed as flags",
 			yaml: `
 templates:
   default:
-    stop-timeout: 30
+    --temp: 0.6
 models:
   m:
     type: llama-server
+    stop_timeout: 30
     flags:
       inherit: default
       port: 12345
@@ -205,7 +208,7 @@ models:
 				URL:         "http://127.0.0.1:12345",
 				Port:        12345,
 				StopTimeout: 30 * time.Second,
-				Flags:       map[string]any{"-c": 4096},
+				Flags:       map[string]any{"--temp": 0.6, "-c": 4096},
 			},
 		},
 		{
@@ -220,9 +223,10 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Bin:  "llama-server",
-				URL:  "http://model-level:1",
-				Port: portFromSelector("m"),
+				Bin:         "llama-server",
+				URL:         "http://model-level:1",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
 			},
 		},
 		{
@@ -235,8 +239,9 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Bin:  "/opt/llama/llama-server",
-				Port: portFromSelector("m"),
+				Bin:         "/opt/llama/llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
 			},
 		},
 		{

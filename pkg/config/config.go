@@ -22,23 +22,22 @@ const (
 	defaultSlotExpiration = time.Hour
 	defaultSlotMaxFiles   = 3
 	defaultInferenceDelay = 1 * time.Second
+	defaultIdleTimeout    = 5 * time.Minute
 )
 
 type LlamaCppFlags struct {
-	Inherit     string         `yaml:"inherit"`
-	Port        int            `yaml:"port"`
-	URL         string         `yaml:"url"`
-	StopTimeout int            `yaml:"stop-timeout"`
-	Args        map[string]any `yaml:",inline"`
+	Inherit string         `yaml:"inherit"`
+	Port    int            `yaml:"port"`
+	URL     string         `yaml:"url"`
+	Args    map[string]any `yaml:",inline"`
 }
 
 func (f LlamaCppFlags) overlay(top LlamaCppFlags) LlamaCppFlags {
 	merged := LlamaCppFlags{
-		Inherit:     cmp.Or(top.Inherit, f.Inherit),
-		Port:        cmp.Or(top.Port, f.Port),
-		URL:         cmp.Or(top.URL, f.URL),
-		StopTimeout: cmp.Or(top.StopTimeout, f.StopTimeout),
-		Args:        make(map[string]any, len(f.Args)+len(top.Args)),
+		Inherit: cmp.Or(top.Inherit, f.Inherit),
+		Port:    cmp.Or(top.Port, f.Port),
+		URL:     cmp.Or(top.URL, f.URL),
+		Args:    make(map[string]any, len(f.Args)+len(top.Args)),
 	}
 	maps.Copy(merged.Args, f.Args)
 	maps.Copy(merged.Args, top.Args)
@@ -55,13 +54,14 @@ type LlamaCppEntry struct {
 
 // ModelEntry represents a model configuration.
 type ModelEntry struct {
-	Type     string         `yaml:"type"`
-	Provider string         `yaml:"provider"`
-	Model    string         `yaml:"model"`
-	LlamaCpp *LlamaCppEntry `yaml:"-"` // populated during load
-	Flags    LlamaCppFlags  `yaml:"flags"`
-	Bin      string         `yaml:"bin"` // llama.cpp binary name
-	URL      string         `yaml:"url"` // explicit URL override
+	Type        string         `yaml:"type"`
+	Provider    string         `yaml:"provider"`
+	Model       string         `yaml:"model"`
+	LlamaCpp    *LlamaCppEntry `yaml:"-"` // populated during load
+	Flags       LlamaCppFlags  `yaml:"flags"`
+	Bin         string         `yaml:"bin"`          // llama.cpp binary name
+	URL         string         `yaml:"url"`          // explicit URL override
+	StopTimeout int            `yaml:"stop_timeout"` // seconds, default 5
 }
 
 // ProviderEntry represents an LLM provider configuration.
@@ -78,6 +78,7 @@ type ServerConfig struct {
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
 	SlotMaxFiles   int           `yaml:"slot_max_files"`
 	InferenceDelay time.Duration `yaml:"inference_delay"`
+	IdleTimeout    int           `yaml:"idle_timeout"`
 }
 
 // Config is the full application configuration.
@@ -190,6 +191,9 @@ func (c *Config) DefaultServer() ServerConfig {
 	if c.Server.InferenceDelay <= 0 {
 		c.Server.InferenceDelay = defaultInferenceDelay
 	}
+	if c.Server.IdleTimeout <= 0 {
+		c.Server.IdleTimeout = int(defaultIdleTimeout / time.Second)
+	}
 	return c.Server
 }
 
@@ -251,7 +255,7 @@ func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppE
 		Bin:         cmp.Or(entry.Bin, defaultLlamaServerBin),
 		URL:         cmp.Or(entry.URL, flags.URL),
 		Port:        cmp.Or(flags.Port, portFromSelector(selector)),
-		StopTimeout: time.Duration(flags.StopTimeout) * time.Second,
+		StopTimeout: time.Duration(cmp.Or(entry.StopTimeout, 30)) * time.Second,
 		Flags:       flags.Args,
 	}
 	return llama, nil
