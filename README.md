@@ -39,6 +39,7 @@ server:
   save_slot_path: /var/cache/aim/slots # optional, default: <user cache dir>/aim/slots
   slot_expiration: 1h                  # optional, default: 1h
   slot_max_files: 3                    # optional, default: 3
+  idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m)
 ```
 
 Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path` when another session takes over the slot (or llama-server stops), and restored when that session comes back. A file counts as used when it is saved or when its session is requested again:
@@ -60,7 +61,7 @@ Keys without a dash are aim settings:
 
 - `inherit: <template>` starts from a template under `templates`; the model's flags and settings win
 - `port`, `url` — where aim runs and reaches llama-server
-- `stop-timeout` — seconds aim waits for llama-server to stop before killing it (default 5)
+- `stop-timeout` — seconds aim waits for llama-server to stop before killing it (default 30)
 
 `--host`, `--port`, `--log-colors` and `--slot-save-path` are always set by aim.
 
@@ -72,12 +73,12 @@ templates:
     -c: 128000
     --jinja: true
     --offline: true
-    stop-timeout: 30
 
 models:
   qwen3.6-35b:
     type: llama-server
     bin: /path/to/llama-server   # optional, default: llama-server from PATH
+    stop_timeout: 10             # optional, seconds before kill (default 30)
     flags:
       inherit: default
       --spec-type: draft-mtp
