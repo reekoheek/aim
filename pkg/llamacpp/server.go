@@ -31,6 +31,7 @@ const (
 	startTimeout          = 30 * time.Second
 	defaultStopTimeout    = 5 * time.Second
 	defaultInferenceDelay = 1 * time.Second
+	defaultIdleTimeout    = 5 * time.Minute
 
 	// CacheSlot is the slot that session-cached requests are pinned to.
 	CacheSlot = 0
@@ -47,6 +48,7 @@ type Server struct {
 	host           string
 	flags          map[string]any
 	stopTimeout    time.Duration
+	idleTimeout    time.Duration
 	selector       string
 	slotSavePath   string
 	slotExpiration time.Duration
@@ -61,6 +63,10 @@ type Server struct {
 	mu             sync.Mutex
 	started        bool
 	startErr       error
+
+	idleMu    sync.Mutex
+	idleTimer *time.Timer
+	active    int
 }
 
 // NewServer creates a new llama.cpp server manager.
@@ -72,6 +78,7 @@ func NewServer(selector string, entry *config.LlamaCppEntry, server config.Serve
 		flags:          entry.Flags,
 		stopTimeout:    cmp.Or(entry.StopTimeout, defaultStopTimeout),
 		inferenceDelay: cmp.Or(server.InferenceDelay, defaultInferenceDelay),
+		idleTimeout:    idleTimeoutDuration(server.IdleTimeout),
 		selector:       selector,
 		slotSavePath:   server.SaveSlotPath,
 		slotExpiration: server.SlotExpiration,
@@ -184,6 +191,10 @@ func (s *Server) Start(ctx context.Context) error {
 		<-time.After(s.inferenceDelay)
 	}
 
+	if s.startIdleTimer() {
+		s.logger.Info("llama.cpp server idle timeout", slog.Duration("timeout", s.idleTimeout))
+	}
+
 	return nil
 }
 
@@ -247,6 +258,70 @@ func (s *Server) Stop(ctx context.Context) {
 		}
 	}
 	s.started = false
+}
+
+// EnterRequest cancels the idle timer while a request is in flight, so an
+// active request never triggers an auto-stop.
+func (s *Server) EnterRequest() {
+	s.idleMu.Lock()
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+	s.active++
+	s.idleMu.Unlock()
+}
+
+// ExitRequest restarts the idle timer once no requests are in flight. When the
+// timer fires it stops the server after idleTimeout.
+func (s *Server) ExitRequest() {
+	s.idleMu.Lock()
+	s.active--
+	if s.active > 0 || s.idleTimeout <= 0 {
+		s.idleMu.Unlock()
+		return
+	}
+	s.armIdleTimer()
+	s.idleMu.Unlock()
+}
+
+// startIdleTimer arms the idle timer for a freshly started server and reports
+// whether it was armed (idleTimeout > 0).
+func (s *Server) startIdleTimer() bool {
+	if s.idleTimeout <= 0 {
+		return false
+	}
+	s.idleMu.Lock()
+	s.armIdleTimer()
+	s.idleMu.Unlock()
+	return true
+}
+
+// armIdleTimer installs a timer that stops the server once it has been idle
+// for idleTimeout. It re-arms if a request snuck in while the timer was
+// pending, so an active request never triggers an auto-stop.
+func (s *Server) armIdleTimer() {
+	s.idleTimer = time.AfterFunc(s.idleTimeout, func() {
+		s.idleMu.Lock()
+		if s.active > 0 {
+			s.armIdleTimer()
+			s.idleMu.Unlock()
+			return
+		}
+		s.idleTimer = nil
+		s.idleMu.Unlock()
+		s.logger.Info("stopping llama.cpp server after idle", slog.Duration("timeout", s.idleTimeout))
+		s.Stop(context.Background())
+	})
+}
+
+// idleTimeoutDuration converts an idle timeout in seconds to a duration,
+// falling back to the default when unset.
+func idleTimeoutDuration(seconds int) time.Duration {
+	if seconds <= 0 {
+		return defaultIdleTimeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Exited reports whether a started server process has since exited.

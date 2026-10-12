@@ -472,3 +472,124 @@ func TestSanitizeFileNameStaysPathSafe(t *testing.T) {
 		}
 	}
 }
+
+func TestIdleTimeoutProcess(t *testing.T) {
+	if os.Getenv("AIM_TEST_IDLE_HELPER") != "1" {
+		return
+	}
+	d, _ := time.ParseDuration(os.Getenv("AIM_IDLE_SLEEP"))
+	time.Sleep(d)
+	os.Exit(0)
+}
+
+func startIdleTestProcess(t *testing.T, srv *Server, sleep time.Duration) {
+	t.Helper()
+	srv.cmd = exec.Command(os.Args[0], "-test.run=^TestIdleTimeoutProcess$")
+	srv.cmd.Env = append(os.Environ(), "AIM_TEST_IDLE_HELPER=1", "AIM_IDLE_SLEEP="+sleep.String())
+	if err := srv.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	srv.done = done
+	go func() {
+		srv.cmd.Wait()
+		close(done)
+	}()
+}
+
+func TestIdleTimeoutArmsAndFires(t *testing.T) {
+	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
+	startIdleTestProcess(t, srv, time.Second)
+
+	if !srv.startIdleTimer() {
+		t.Fatal("startIdleTimer reported no timer armed")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for !srv.Exited() {
+		select {
+		case <-deadline:
+			t.Fatal("server did not stop after idle timeout")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestIdleTimeoutDisabledWhenZero(t *testing.T) {
+	srv := &Server{idleTimeout: 0, logger: logger.New("ERROR")}
+	startIdleTestProcess(t, srv, time.Second)
+
+	if srv.startIdleTimer() {
+		t.Fatal("startIdleTimer armed with idle timeout 0")
+	}
+	select {
+	case <-time.After(300 * time.Millisecond):
+	case <-srv.done:
+		t.Fatal("server stopped with idle timeout disabled")
+	}
+}
+
+func TestEnterRequestCancelsIdleTimer(t *testing.T) {
+	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
+	startIdleTestProcess(t, srv, time.Second)
+	srv.startIdleTimer()
+
+	srv.EnterRequest()
+	select {
+	case <-time.After(400 * time.Millisecond):
+	case <-srv.done:
+		t.Fatal("server stopped while a request was in flight")
+	}
+
+	srv.ExitRequest()
+	deadline := time.After(2 * time.Second)
+	for !srv.Exited() {
+		select {
+		case <-deadline:
+			t.Fatal("server did not stop after request exit and idle timeout")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestExitRequestWaitsUntilAllRequestsDone(t *testing.T) {
+	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
+	startIdleTestProcess(t, srv, time.Second)
+	srv.startIdleTimer()
+
+	srv.EnterRequest()
+	srv.EnterRequest()
+	srv.ExitRequest()
+	select {
+	case <-time.After(400 * time.Millisecond):
+	case <-srv.done:
+		t.Fatal("server stopped while a request was still in flight")
+	}
+
+	srv.ExitRequest()
+	deadline := time.After(2 * time.Second)
+	for !srv.Exited() {
+		select {
+		case <-deadline:
+			t.Fatal("server did not stop after the last request exited")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func TestIdleTimeoutDuration(t *testing.T) {
+	tests := []struct {
+		seconds int
+		want    time.Duration
+	}{
+		{0, defaultIdleTimeout},
+		{-5, defaultIdleTimeout},
+		{300, 300 * time.Second},
+		{1, time.Second},
+	}
+	for _, tt := range tests {
+		if got := idleTimeoutDuration(tt.seconds); got != tt.want {
+			t.Errorf("idleTimeoutDuration(%d) = %v, want %v", tt.seconds, got, tt.want)
+		}
+	}
+}

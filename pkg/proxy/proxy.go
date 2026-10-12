@@ -183,6 +183,11 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		targetURL = llama.URL() + "/v1/chat/completions"
 	}
 
+	if llama != nil {
+		llama.EnterRequest()
+		defer llama.ExitRequest()
+	}
+
 	session := sessionID(r)
 
 	p.logger.LogRequest(r.Method, r.URL.Path, req.Model, r.RemoteAddr)
