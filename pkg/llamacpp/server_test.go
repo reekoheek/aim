@@ -1,10 +1,22 @@
 package llamacpp
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
 )
 
@@ -132,6 +144,216 @@ func TestNewServerStopTimeout(t *testing.T) {
 			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, "", nil).stopTimeout
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type fakeSlotServer struct {
+	mu          sync.Mutex
+	dir         string
+	failRestore map[string]bool
+	actions     []string
+}
+
+func (f *fakeSlotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	action := r.URL.Query().Get("action")
+
+	f.mu.Lock()
+	f.actions = append(f.actions, action+" "+body.Filename)
+	f.mu.Unlock()
+
+	switch {
+	case action == "restore" && f.failRestore[body.Filename]:
+		http.Error(w, "restore failed", http.StatusInternalServerError)
+	case action == "save":
+		if err := os.WriteFile(filepath.Join(f.dir, body.Filename), []byte("kv"), 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, `{"n_saved": 1}`)
+	default:
+		fmt.Fprint(w, `{"n_restored": 1}`)
+	}
+}
+
+func (f *fakeSlotServer) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.actions)
+}
+
+type slotRequest struct {
+	session string
+	keep    bool
+}
+
+func newSlotTestServer(t *testing.T, existing []string, failRestore []string, stopTimeout time.Duration) (*Server, *fakeSlotServer) {
+	t.Helper()
+	dir := t.TempDir()
+	fake := &fakeSlotServer{dir: dir, failRestore: map[string]bool{}}
+	httpServer := httptest.NewServer(fake)
+	t.Cleanup(httpServer.Close)
+
+	entry := &config.LlamaCppEntry{
+		Port:        httpServer.Listener.Addr().(*net.TCPAddr).Port,
+		StopTimeout: stopTimeout,
+	}
+	srv := NewServer("m", entry, dir, logger.New("ERROR"))
+	for _, session := range existing {
+		if err := os.WriteFile(filepath.Join(dir, srv.slotFile(session)), []byte("kv"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, session := range failRestore {
+		fake.failRestore[srv.slotFile(session)] = true
+	}
+	return srv, fake
+}
+
+func runSlotRequests(t *testing.T, srv *Server, requests []slotRequest) {
+	t.Helper()
+	for _, request := range requests {
+		release, err := srv.AcquireSlot(context.Background(), request.session)
+		if err != nil {
+			t.Fatalf("AcquireSlot(%q): %v", request.session, err)
+		}
+		release(request.keep)
+	}
+}
+
+func expectedActions(srv *Server, actions []string) []string {
+	var expected []string
+	for _, action := range actions {
+		name, session, _ := strings.Cut(action, " ")
+		expected = append(expected, name+" "+srv.slotFile(session))
+	}
+	return expected
+}
+
+func TestAcquireSlotSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
+	tests := []struct {
+		name        string
+		existing    []string
+		failRestore []string
+		requests    []slotRequest
+		want        []string
+	}{
+		{
+			name:     "same session reuses the slot without save or restore",
+			requests: []slotRequest{{"a", true}, {"a", true}, {"a", true}},
+			want:     nil,
+		},
+		{
+			name:     "switching session saves the previous one",
+			requests: []slotRequest{{"a", true}, {"b", true}},
+			want:     []string{"save a"},
+		},
+		{
+			name:     "switching back restores the saved session",
+			requests: []slotRequest{{"a", true}, {"b", true}, {"a", true}},
+			want:     []string{"save a", "save b", "restore a"},
+		},
+		{
+			name:     "existing cache is restored on the first request",
+			existing: []string{"a"},
+			requests: []slotRequest{{"a", true}, {"a", true}},
+			want:     []string{"restore a"},
+		},
+		{
+			name:     "session not kept is not saved",
+			requests: []slotRequest{{"a", false}, {"b", true}},
+			want:     nil,
+		},
+		{
+			name:        "session is saved after a failed restore",
+			existing:    []string{"a"},
+			failRestore: []string{"a"},
+			requests:    []slotRequest{{"a", true}, {"b", true}},
+			want:        []string{"restore a", "save a"},
+		},
+		{
+			name:     "session-less request evicts the session",
+			requests: []slotRequest{{"a", true}, {"", true}, {"a", true}},
+			want:     []string{"save a", "restore a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, fake := newSlotTestServer(t, tt.existing, tt.failRestore, 0)
+			runSlotRequests(t, srv, tt.requests)
+			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("AIM_TEST_HELPER_PROCESS") != "1" {
+		return
+	}
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+func startHelperProcess(t *testing.T, srv *Server) {
+	t.Helper()
+	srv.cmd = exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
+	srv.cmd.Env = append(os.Environ(), "AIM_TEST_HELPER_PROCESS=1")
+	if err := srv.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	srv.done = done
+	go func() {
+		srv.cmd.Wait()
+		close(done)
+	}()
+}
+
+func TestStopSavesUnsavedSlot(t *testing.T) {
+	tests := []struct {
+		name     string
+		requests []slotRequest
+		want     []string
+	}{
+		{
+			name:     "unsaved session is saved",
+			requests: []slotRequest{{"a", true}},
+			want:     []string{"save a"},
+		},
+		{
+			name:     "session not kept is not saved",
+			requests: []slotRequest{{"a", false}},
+			want:     nil,
+		},
+		{
+			name:     "session saved on switch is not saved again",
+			requests: []slotRequest{{"a", true}, {"b", false}},
+			want:     []string{"save a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, fake := newSlotTestServer(t, nil, nil, time.Second)
+			startHelperProcess(t, srv)
+			runSlotRequests(t, srv, tt.requests)
+			srv.Stop(context.Background())
+			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
+				t.Errorf("got %q, want %q", got, want)
+			}
+			if !srv.Exited() {
+				t.Error("process still running after Stop")
 			}
 		})
 	}

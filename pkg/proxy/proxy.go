@@ -193,10 +193,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		slog.Bool("stream", req.Stream),
 	)
 
-	// Slot cache (llama-server only): every request holds the cache slot so
-	// none can clobber it between a session's restore and save. The save runs
-	// after the handler returns, so the client is not kept waiting for it.
-	saveSlot := false
+	keepSlot := false
 	if llama != nil && llama.SlotCacheEnabled() {
 		release, err := llama.AcquireSlot(r.Context(), session)
 		if err != nil {
@@ -204,7 +201,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":{"message":"%s","type":"server_error","param":null,"code":null}}`, err.Error()), http.StatusServiceUnavailable)
 			return
 		}
-		defer func() { go release(saveSlot) }()
+		defer func() { release(keepSlot) }()
 
 		// Pin the request to the restored slot and reuse its cached prompt.
 		var fields map[string]json.RawMessage
@@ -271,7 +268,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	// Stream only successful responses; upstream errors are plain JSON
 	// and are forwarded below with their original status code.
 	if req.Stream && httpResp.StatusCode/100 == 2 {
-		saveSlot = p.streamResponse(w, httpResp, start)
+		keepSlot = p.streamResponse(w, httpResp, start)
 		return
 	}
 
@@ -296,7 +293,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-Id", httpResp.Header.Get("X-Request-Id"))
 	w.WriteHeader(httpResp.StatusCode)
 	w.Write(body)
-	saveSlot = httpResp.StatusCode/100 == 2
+	keepSlot = httpResp.StatusCode/100 == 2
 }
 
 // noSession is the session of requests without X-Session-Affinity, so their

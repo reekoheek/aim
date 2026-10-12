@@ -51,6 +51,7 @@ type Server struct {
 	slotSavePath string
 	slot         chan struct{} // held by one request at a time while slot caching is on
 	slotSession  string        // session currently loaded in CacheSlot, if known
+	slotUnsaved  bool
 	cmd          *exec.Cmd
 	done         chan struct{} // closed once the process has exited
 	logger       *logger.Logger
@@ -206,6 +207,9 @@ func (s *Server) Stop(ctx context.Context) {
 	// process has exited.
 	select {
 	case s.slot <- struct{}{}:
+		if s.done != nil && !s.Exited() {
+			s.saveUnsavedSlot()
+		}
 	case <-s.done:
 	case <-ctx.Done():
 	}
@@ -297,12 +301,7 @@ func (s *Server) SlotCacheEnabled() bool {
 	return s.slotSavePath != ""
 }
 
-// AcquireSlot waits for CacheSlot until ctx is done or the server exits and,
-// for a non-empty sessionID, restores the session's saved KV cache into it
-// unless the slot already holds it. On success the returned release must be
-// called exactly once; with save true it writes the slot back to the
-// session's file before freeing it.
-func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release func(save bool), err error) {
+func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release func(keep bool), err error) {
 	start := time.Now()
 	select {
 	case s.slot <- struct{}{}:
@@ -318,40 +317,40 @@ func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release fun
 		slog.Duration("waited", acquired.Sub(start)),
 	)
 
-	switch {
-	case sessionID == "":
-		// A session-less request may run on CacheSlot and overwrite it.
+	if s.slotSession != sessionID {
+		s.saveUnsavedSlot()
 		s.slotSession = ""
-	case s.slotSession != sessionID:
-		// The request is pinned to CacheSlot, so even if it fails the slot
-		// holds this session afterwards. A failed restore is retried.
-		if s.restoreSlot(sessionID) {
+		if sessionID != "" && s.restoreSlot(sessionID) {
 			s.slotSession = sessionID
-		} else {
-			s.slotSession = ""
 		}
 	}
 
-	return func(save bool) {
+	return func(keep bool) {
 		defer func() { <-s.slot }()
 
-		saved := false
-		if save && sessionID != "" {
-			file := s.slotFile(sessionID)
-			if err := s.slotAction("save", file); err != nil {
-				s.logger.LogError("failed to save slot", err, slog.String("session", sessionID), slog.String("file", file))
-			} else {
-				saved = true
-			}
+		if keep && sessionID != "" {
+			s.slotSession = sessionID
+			s.slotUnsaved = true
 		}
 
 		s.logger.Info("slot released",
 			slog.Int("slot", CacheSlot),
 			slog.String("session", sessionID),
-			slog.Bool("saved", saved),
+			slog.Bool("kept", keep),
 			slog.Duration("held", time.Since(acquired)),
 		)
 	}, nil
+}
+
+func (s *Server) saveUnsavedSlot() {
+	if s.slotSession == "" || !s.slotUnsaved {
+		return
+	}
+	file := s.slotFile(s.slotSession)
+	if err := s.slotAction("save", file); err != nil {
+		s.logger.LogError("failed to save slot", err, slog.String("session", s.slotSession), slog.String("file", file))
+	}
+	s.slotUnsaved = false
 }
 
 // restoreSlot loads the session's saved KV cache into CacheSlot, if any, and
