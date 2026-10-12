@@ -284,6 +284,7 @@ func (s *Server) args() []string {
 	return append(append([]string{
 		"--offline",
 		"--no-cors-credentials",
+		"--no-webui",
 	}, flagArgs(s.flags)...),
 		"--host", s.host,
 		"--port", strconv.Itoa(s.port),

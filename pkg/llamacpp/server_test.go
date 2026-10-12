@@ -102,7 +102,7 @@ func TestServerArgs(t *testing.T) {
 		{
 			name:  "managed flags only",
 			entry: &config.LlamaCppEntry{Port: 12345},
-			want:  []string{"--offline", "--no-cors-credentials", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
+			want:  []string{"--offline", "--no-cors-credentials", "--no-webui", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
 		},
 		{
 			name: "managed flags come after model flags",
@@ -113,6 +113,7 @@ func TestServerArgs(t *testing.T) {
 			want: []string{
 				"--offline",
 				"--no-cors-credentials",
+				"--no-webui",
 				"-ngl", "999",
 				"--host", "127.0.0.1",
 				"--port", "23456",
