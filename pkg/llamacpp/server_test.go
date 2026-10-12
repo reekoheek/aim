@@ -149,6 +149,26 @@ func TestNewServerStopTimeout(t *testing.T) {
 	}
 }
 
+func TestNewServerInferenceDelay(t *testing.T) {
+	tests := []struct {
+		name  string
+		delay time.Duration
+		want  time.Duration
+	}{
+		{name: "default", delay: 0, want: defaultInferenceDelay},
+		{name: "configured", delay: 5 * time.Second, want: 5 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NewServer("m", &config.LlamaCppEntry{}, config.ServerConfig{InferenceDelay: tt.delay}, nil).inferenceDelay
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 type fakeSlotServer struct {
 	mu          sync.Mutex
 	dir         string

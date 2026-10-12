@@ -26,10 +26,11 @@ import (
 )
 
 const (
-	defaultPort        = 8082
-	defaultHost        = "127.0.0.1"
-	startTimeout       = 30 * time.Second
-	defaultStopTimeout = 5 * time.Second
+	defaultPort           = 8082
+	defaultHost           = "127.0.0.1"
+	startTimeout          = 30 * time.Second
+	defaultStopTimeout    = 5 * time.Second
+	defaultInferenceDelay = 1 * time.Second
 
 	// CacheSlot is the slot that session-cached requests are pinned to.
 	CacheSlot = 0
@@ -50,6 +51,7 @@ type Server struct {
 	slotSavePath   string
 	slotExpiration time.Duration
 	slotMaxFiles   int
+	inferenceDelay time.Duration
 	slot           chan struct{} // held by one request at a time while slot caching is on
 	slotSession    string        // session currently loaded in CacheSlot, if known
 	slotUnsaved    bool
@@ -69,6 +71,7 @@ func NewServer(selector string, entry *config.LlamaCppEntry, server config.Serve
 		host:           defaultHost,
 		flags:          entry.Flags,
 		stopTimeout:    cmp.Or(entry.StopTimeout, defaultStopTimeout),
+		inferenceDelay: cmp.Or(server.InferenceDelay, defaultInferenceDelay),
 		selector:       selector,
 		slotSavePath:   server.SaveSlotPath,
 		slotExpiration: server.SlotExpiration,
@@ -175,6 +178,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.started = true
 	s.logger.Info("llama.cpp server ready", slog.String("addr", addr))
+
+	if s.inferenceDelay > 0 {
+		s.logger.Info("waiting for inference delay", slog.Duration("delay", s.inferenceDelay))
+		<-time.After(s.inferenceDelay)
+	}
+
 	return nil
 }
 
