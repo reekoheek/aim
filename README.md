@@ -38,9 +38,15 @@ server:
   port: 8080
   save_slot_path: /var/cache/aim/slots # optional, default: <user cache dir>/aim/slots
   slot_expiration: 1h                  # optional, default: 1h
+  slot_max_files: 3                    # optional, default: 3
 ```
 
-Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path`. Files not saved for longer than `slot_expiration` (a Go duration such as `1h`, `90m`) are deleted on startup and then periodically (every `slot_expiration`, at most hourly).
+Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path` when another session takes over the slot (or llama-server stops), and restored when that session comes back. A file counts as used when it is saved or when its session is requested again:
+
+- files unused for longer than `slot_expiration` (a Go duration such as `1h`, `90m`) are deleted
+- only the `slot_max_files` most recently used files are kept; older ones are deleted right after a session switch
+
+Both limits are also applied on startup and then periodically (every `slot_expiration`, at most hourly).
 
 ### Local llama-server models
 
