@@ -52,25 +52,22 @@ type LlamaCppEntry struct {
 	Flags       map[string]any
 }
 
-// ModelEntry represents a model configuration.
 type ModelEntry struct {
 	Type        string         `yaml:"type"`
 	Provider    string         `yaml:"provider"`
 	Model       string         `yaml:"model"`
-	LlamaCpp    *LlamaCppEntry `yaml:"-"` // populated during load
+	LlamaCpp    *LlamaCppEntry `yaml:"-"`
 	Flags       LlamaCppFlags  `yaml:"flags"`
-	Bin         string         `yaml:"bin"`          // llama.cpp binary name
-	URL         string         `yaml:"url"`          // explicit URL override
-	StopTimeout int            `yaml:"stop_timeout"` // seconds, default 5
+	Bin         string         `yaml:"bin"`
+	URL         string         `yaml:"url"`
+	StopTimeout int            `yaml:"stop_timeout"`
 }
 
-// ProviderEntry represents an LLM provider configuration.
 type ProviderEntry struct {
 	BaseURL string `yaml:"base_url"`
 	APIKey  string `yaml:"api_key"`
 }
 
-// ServerConfig holds the server listening configuration.
 type ServerConfig struct {
 	Host           string        `yaml:"host"`
 	Port           int           `yaml:"port"`
@@ -81,7 +78,6 @@ type ServerConfig struct {
 	IdleTimeout    int           `yaml:"idle_timeout"`
 }
 
-// Config is the full application configuration.
 type Config struct {
 	Models    map[string]ModelEntry    `yaml:"models"`
 	Providers map[string]ProviderEntry `yaml:"providers"`
@@ -89,8 +85,6 @@ type Config struct {
 	Server    ServerConfig             `yaml:"server"`
 }
 
-// ResolveModel resolves a model selector to its type and info.
-// Returns: type ("provider" or "llama.cpp"), additional info, error.
 func (c *Config) ResolveModel(selector string) (modelType string, info map[string]any, err error) {
 	entry, ok := c.Models[selector]
 	if !ok {
@@ -127,7 +121,6 @@ func (c *Config) ResolveModel(selector string) (modelType string, info map[strin
 	}
 }
 
-// GetProvider returns the provider configuration for the given provider ID.
 func (c *Config) GetProvider(id string) (ProviderEntry, error) {
 	p, ok := c.Providers[id]
 	if !ok {
@@ -139,7 +132,6 @@ func (c *Config) GetProvider(id string) (ProviderEntry, error) {
 	return p, nil
 }
 
-// GetLlamaCppEntry returns the llama.cpp entry for a model.
 func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 	entry, ok := c.Models[selector]
 	if !ok {
@@ -154,7 +146,6 @@ func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 	return entry.LlamaCpp, nil
 }
 
-// GetModelURL returns the target URL for a model (provider or llama.cpp).
 func (c *Config) GetModelURL(selector string) (string, error) {
 	_, info, err := c.ResolveModel(selector)
 	if err != nil {
@@ -167,7 +158,6 @@ func (c *Config) GetModelURL(selector string) (string, error) {
 	return url.(string), nil
 }
 
-// DefaultServer returns the default server configuration.
 func (c *Config) DefaultServer() ServerConfig {
 	if c.Server.Host == "" {
 		c.Server.Host = "0.0.0.0"
@@ -175,8 +165,6 @@ func (c *Config) DefaultServer() ServerConfig {
 	if c.Server.Port == 0 {
 		c.Server.Port = 8080
 	}
-	// Session KV caches go to the user cache dir unless configured; without
-	// one, slot caching stays off.
 	if c.Server.SaveSlotPath == "" {
 		if dir, err := os.UserCacheDir(); err == nil {
 			c.Server.SaveSlotPath = filepath.Join(dir, "aim", "slots")
@@ -197,7 +185,6 @@ func (c *Config) DefaultServer() ServerConfig {
 	return c.Server
 }
 
-// Load reads and parses a YAML config file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -269,7 +256,6 @@ func portFromSelector(selector string) int {
 	return firstSelectorPort + int(hash%selectorPortRange)
 }
 
-// FindConfig searches for .aim.yaml starting from the given directory.
 func FindConfig(dir string) (string, error) {
 	path := filepath.Join(dir, ".aim.yaml")
 	if _, err := os.Stat(path); err == nil {

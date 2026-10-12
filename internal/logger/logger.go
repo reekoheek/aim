@@ -11,12 +11,10 @@ import (
 	"time"
 )
 
-// Logger wraps a slog.Logger with convenient methods.
 type Logger struct {
 	*slog.Logger
 }
 
-// New creates a new logger with human-readable format.
 func New(level string) *Logger {
 	l := slog.LevelInfo
 	switch strings.ToUpper(level) {
@@ -36,7 +34,6 @@ func New(level string) *Logger {
 	return &Logger{slog.New(handler)}
 }
 
-// humanHandler is a slog.Handler that outputs human-readable logs.
 type humanHandler struct {
 	w       io.Writer
 	level   slog.Level
@@ -82,7 +79,6 @@ func (h *humanHandler) WithGroup(name string) slog.Handler {
 	}
 }
 
-// LogRequest logs an incoming request.
 func (l *Logger) LogRequest(method, path, model, remoteAddr string) {
 	l.Info("request",
 		"method", method,
@@ -92,7 +88,6 @@ func (l *Logger) LogRequest(method, path, model, remoteAddr string) {
 	)
 }
 
-// LogResponse logs the response status and duration.
 func (l *Logger) LogResponse(status int, duration time.Duration) {
 	l.Info("response",
 		"status", status,
@@ -100,12 +95,10 @@ func (l *Logger) LogResponse(status int, duration time.Duration) {
 	)
 }
 
-// LogError logs an error.
 func (l *Logger) LogError(msg string, err error, attrs ...any) {
 	l.Error(msg, append(attrs, "error", err)...)
 }
 
-// LogHeaders logs the incoming request headers (key-value pairs).
 func (l *Logger) LogHeaders(headers http.Header) {
 	if headers == nil {
 		return

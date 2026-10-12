@@ -33,15 +33,11 @@ const (
 	defaultInferenceDelay = 1 * time.Second
 	defaultIdleTimeout    = 5 * time.Minute
 
-	// CacheSlot is the slot that session-cached requests are pinned to.
 	CacheSlot = 0
 )
 
-// slotClient talks to the slot save/restore endpoints. The timeout keeps a
-// hung server from holding the slot lock forever.
 var slotClient = &http.Client{Timeout: time.Minute}
 
-// Server manages a llama.cpp server process.
 type Server struct {
 	bin            string
 	port           int
@@ -54,11 +50,11 @@ type Server struct {
 	slotExpiration time.Duration
 	slotMaxFiles   int
 	inferenceDelay time.Duration
-	slot           chan struct{} // held by one request at a time while slot caching is on
-	slotSession    string        // session currently loaded in CacheSlot, if known
+	slot           chan struct{}
+	slotSession    string
 	slotUnsaved    bool
 	cmd            *exec.Cmd
-	done           chan struct{} // closed once the process has exited
+	done           chan struct{}
 	logger         *logger.Logger
 	mu             sync.Mutex
 	started        bool
@@ -69,7 +65,6 @@ type Server struct {
 	active    int
 }
 
-// NewServer creates a new llama.cpp server manager.
 func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) *Server {
 	return &Server{
 		bin:            entry.Bin,
@@ -88,7 +83,6 @@ func NewServer(selector string, entry *config.LlamaCppEntry, server config.Serve
 	}
 }
 
-// Start starts the llama.cpp server process and waits for it to be ready.
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -97,7 +91,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startErr
 	}
 
-	// Find llama-server binary
 	binPath, err := exec.LookPath(s.bin)
 	if err != nil {
 		s.startErr = fmt.Errorf("llama.cpp binary %q not found: %w", s.bin, err)
@@ -107,7 +100,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	args := s.args()
 
-	// llama-server does not create the slot save dir itself.
 	if s.slotSavePath != "" {
 		dir, err := filepath.Abs(s.slotSavePath)
 		if err == nil {
@@ -122,13 +114,10 @@ func (s *Server) Start(ctx context.Context) error {
 		args = append(args, "--slot-save-path", dir)
 	}
 
-	// Log full command
 	s.logger.Info("starting llama.cpp server",
 		slog.String("cmd", fmt.Sprintf("%s %s", binPath, strings.Join(args, " "))),
 	)
 
-	// A leftover llama-server on our port would answer the health check
-	// below while our own process fails to bind.
 	addr := net.JoinHostPort(s.host, strconv.Itoa(s.port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -164,8 +153,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startErr
 	}
 
-	// Reap the process so it never lingers as a zombie, and let Stop and
-	// Exited observe its exit. Wait closes the stderr pipe, so drain it first.
 	done := make(chan struct{})
 	s.done = done
 	go func() {
@@ -198,8 +185,6 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// waitReady polls /health until the server is up, it exits, or startTimeout
-// passes.
 func (s *Server) waitReady(done <-chan struct{}) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.After(startTimeout)
@@ -221,13 +206,7 @@ func (s *Server) waitReady(done <-chan struct{}) error {
 	}
 }
 
-// Stop waits for the request holding CacheSlot, including its pending slot
-// save, so neither is cut off, then stops the llama.cpp server process and
-// waits for it to exit, killing it if it does not stop within stopTimeout.
-// Once ctx is done it stops without waiting for the slot.
 func (s *Server) Stop(ctx context.Context) {
-	// The slot is kept, so requests still queued for it fail once the
-	// process has exited.
 	select {
 	case s.slot <- struct{}{}:
 		if s.done != nil && !s.Exited() {
@@ -260,8 +239,6 @@ func (s *Server) Stop(ctx context.Context) {
 	s.started = false
 }
 
-// EnterRequest cancels the idle timer while a request is in flight, so an
-// active request never triggers an auto-stop.
 func (s *Server) EnterRequest() {
 	s.idleMu.Lock()
 	if s.idleTimer != nil {
@@ -272,8 +249,6 @@ func (s *Server) EnterRequest() {
 	s.idleMu.Unlock()
 }
 
-// ExitRequest restarts the idle timer once no requests are in flight. When the
-// timer fires it stops the server after idleTimeout.
 func (s *Server) ExitRequest() {
 	s.idleMu.Lock()
 	s.active--
@@ -285,8 +260,6 @@ func (s *Server) ExitRequest() {
 	s.idleMu.Unlock()
 }
 
-// startIdleTimer arms the idle timer for a freshly started server and reports
-// whether it was armed (idleTimeout > 0).
 func (s *Server) startIdleTimer() bool {
 	if s.idleTimeout <= 0 {
 		return false
@@ -297,9 +270,6 @@ func (s *Server) startIdleTimer() bool {
 	return true
 }
 
-// armIdleTimer installs a timer that stops the server once it has been idle
-// for idleTimeout. It re-arms if a request snuck in while the timer was
-// pending, so an active request never triggers an auto-stop.
 func (s *Server) armIdleTimer() {
 	s.idleTimer = time.AfterFunc(s.idleTimeout, func() {
 		s.idleMu.Lock()
@@ -315,8 +285,6 @@ func (s *Server) armIdleTimer() {
 	})
 }
 
-// idleTimeoutDuration converts an idle timeout in seconds to a duration,
-// falling back to the default when unset.
 func idleTimeoutDuration(seconds int) time.Duration {
 	if seconds <= 0 {
 		return defaultIdleTimeout
@@ -324,7 +292,6 @@ func idleTimeoutDuration(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// Exited reports whether a started server process has since exited.
 func (s *Server) Exited() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,17 +307,14 @@ func (s *Server) Exited() bool {
 	}
 }
 
-// URL returns the server URL.
 func (s *Server) URL() string {
 	return fmt.Sprintf("http://%s:%d", s.host, s.port)
 }
 
-// Selector returns the model selector for this server.
 func (s *Server) Selector() string {
 	return s.selector
 }
 
-// GetFlags returns the server flags for logging.
 func (s *Server) GetFlags() map[string]any {
 	return s.flags
 }
@@ -389,7 +353,6 @@ func flagArgs(flags map[string]any) []string {
 	return args
 }
 
-// SlotCacheEnabled reports whether session KV caches are persisted to disk.
 func (s *Server) SlotCacheEnabled() bool {
 	return s.slotSavePath != ""
 }
@@ -463,8 +426,6 @@ func (s *Server) markSlotUsed(sessionID string) {
 	}
 }
 
-// restoreSlot loads the session's saved KV cache into CacheSlot, if any, and
-// reports false if loading it failed.
 func (s *Server) restoreSlot(sessionID string) bool {
 	file := s.slotFile(sessionID)
 	if _, err := os.Stat(filepath.Join(s.slotSavePath, file)); err != nil {
@@ -477,22 +438,16 @@ func (s *Server) restoreSlot(sessionID string) bool {
 	return true
 }
 
-// slotFile names the session's cache file. llama-server only accepts a bare
-// filename relative to --slot-save-path, so the session ID is normalized to a
-// safe charset; characters that would break the path become "--". Each session
-// always uses the same model, so the model is not part of the name.
 func (s *Server) slotFile(sessionID string) string {
 	return sanitizeFileName(sessionID) + ".bin"
 }
 
 var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-// sanitizeFileName maps any character that is unsafe in a filename to "--".
 func sanitizeFileName(id string) string {
 	return unsafeFileNameChars.ReplaceAllString(id, "--")
 }
 
-// slotAction runs a save/restore/erase action on CacheSlot.
 func (s *Server) slotAction(action, file string) error {
 	start := time.Now()
 	url := fmt.Sprintf("http://%s:%d/slots/%d?action=%s", s.host, s.port, CacheSlot, action)

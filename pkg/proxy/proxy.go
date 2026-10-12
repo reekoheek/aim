@@ -17,7 +17,6 @@ import (
 	"github.com/reekoheek/aim/pkg/llamacpp"
 )
 
-// Proxy is the LLM proxy handler.
 type Proxy struct {
 	cfg    *config.Config
 	logger *logger.Logger
@@ -26,13 +25,10 @@ type Proxy struct {
 	mu     sync.Mutex
 }
 
-// Llama returns the llama.cpp server, or nil if not using one.
 func (p *Proxy) Llama() *llamacpp.Server {
 	return p.llama
 }
 
-// Close stops the llama.cpp server, if one is running, letting the request
-// holding its slot finish until ctx is done.
 func (p *Proxy) Close(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -43,22 +39,10 @@ func (p *Proxy) Close(ctx context.Context) {
 	}
 }
 
-// formatJSON pretty-prints JSON for logging.
-func (p *Proxy) formatJSON(data []byte) string {
-	var out bytes.Buffer
-	if err := json.Indent(&out, data, "", "  "); err != nil {
-		return string(data)
-	}
-	return out.String()
-}
-
-// New creates a new Proxy.
 func New(cfg *config.Config, l *logger.Logger) *Proxy {
 	return &Proxy{
 		cfg:    cfg,
 		logger: l,
-		// No overall timeout: long streaming generations must not be cut off.
-		// The request is canceled when the downstream client disconnects.
 		client: &http.Client{
 			Transport: &http.Transport{
 				DisableKeepAlives: true,
@@ -68,13 +52,10 @@ func New(cfg *config.Config, l *logger.Logger) *Proxy {
 	}
 }
 
-// Handler is the HTTP handler for the proxy.
 func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	p.handleCompletion(w, r)
 }
 
-// CompletionRequest represents the OpenAI chat completion request body.
-// Only parses model and stream — messages are forwarded as-is.
 type CompletionRequest struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
@@ -83,7 +64,6 @@ type CompletionRequest struct {
 func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		p.logger.LogError("failed to read request body", err)
@@ -98,13 +78,11 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate model
 	if req.Model == "" {
 		http.Error(w, `{"error":{"message":"model is required","type":"invalid_request_error","param":"model","code":null}}`, http.StatusBadRequest)
 		return
 	}
 
-	// Resolve model
 	modelType, info, err := p.cfg.ResolveModel(req.Model)
 	if err != nil {
 		p.logger.LogError("failed to resolve model", err, slog.String("model", req.Model))
@@ -124,7 +102,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Rewrite model name
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(body, &fields); err != nil {
 			p.logger.LogError("failed to parse request body", err)
@@ -143,18 +120,14 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 
 	case "llama-server":
 		p.mu.Lock()
-		// The client may have left while a server start or swap held the lock;
-		// don't let it swap the model now.
 		if r.Context().Err() != nil {
 			p.mu.Unlock()
 			return
 		}
-		// A crashed server is dropped so the next request starts a new one.
 		if p.llama != nil && p.llama.Exited() {
 			p.logger.Info("llama server has exited", slog.String("model", p.llama.Selector()))
 			p.llama = nil
 		}
-		// Stop old server if running a different model
 		if p.llama != nil && p.llama.Selector() != req.Model {
 			p.logger.Info("replacing llama server", slog.String("old", p.llama.Selector()), slog.String("new", req.Model))
 			p.llama.Stop(context.Background())
@@ -169,7 +142,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			srv := llamacpp.NewServer(req.Model, entry, p.cfg.DefaultServer(), p.logger)
-			// Only keep a server that started, so a failed start is retried.
 			if err := srv.Start(r.Context()); err != nil {
 				p.logger.LogError("failed to start llama server", err)
 				p.mu.Unlock()
@@ -207,7 +179,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() { release(keepSlot) }()
 
-		// Pin the request to the restored slot and reuse its cached prompt.
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(body, &fields); err == nil {
 			fields["id_slot"], _ = json.Marshal(llamacpp.CacheSlot)
@@ -223,7 +194,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy headers (except hop-by-hop)
 	hopByHop := map[string]bool{
 		"connection":          true,
 		"transfer-encoding":   true,
@@ -234,9 +204,7 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		"te":                  true,
 		"trailer":             true,
 		"upgrade":             true,
-		// Let the transport negotiate compression; the response is forwarded
-		// without Content-Encoding, so it must arrive decompressed.
-		"accept-encoding": true,
+		"accept-encoding":     true,
 	}
 
 	for k, v := range r.Header {
@@ -248,7 +216,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set required headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	if modelType == "provider" {
 		if prov, ok := info["provider"].(string); ok {
@@ -258,7 +225,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute request
 	httpResp, err := p.client.Do(httpReq)
 	if err != nil {
 		p.logger.LogError("upstream request failed", err,
@@ -269,14 +235,11 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	defer httpResp.Body.Close()
 
-	// Stream only successful responses; upstream errors are plain JSON
-	// and are forwarded below with their original status code.
 	if req.Stream && httpResp.StatusCode/100 == 2 {
 		keepSlot = p.streamResponse(w, httpResp, start)
 		return
 	}
 
-	// Non-streaming: read full response
 	body, err = io.ReadAll(httpResp.Body)
 	if err != nil {
 		p.logger.LogError("failed to read upstream response", err)
@@ -284,7 +247,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log response
 	p.logger.LogResponse(httpResp.StatusCode, time.Since(start))
 	p.logger.Info("response body",
 		slog.Int("status", httpResp.StatusCode),
@@ -292,7 +254,6 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 		slog.String("body", string(body)),
 	)
 
-	// Forward response
 	w.Header().Set("Content-Type", httpResp.Header.Get("Content-Type"))
 	w.Header().Set("X-Request-Id", httpResp.Header.Get("X-Request-Id"))
 	w.WriteHeader(httpResp.StatusCode)
@@ -300,12 +261,8 @@ func (p *Proxy) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	keepSlot = httpResp.StatusCode/100 == 2
 }
 
-// noSession is the session of requests without X-Session-Affinity, so their
-// slot is cached too.
 const noSession = "-"
 
-// sessionID returns the request's X-Session-Affinity, or noSession if it has
-// none.
 func sessionID(r *http.Request) string {
 	if id := strings.TrimSpace(r.Header.Get("X-Session-Affinity")); id != "" {
 		return id
@@ -313,9 +270,7 @@ func sessionID(r *http.Request) string {
 	return noSession
 }
 
-// streamResponse forwards an SSE stream and reports whether it ran to the end.
 func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, start time.Time) bool {
-	// Set streaming headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -327,8 +282,6 @@ func (p *Proxy) streamResponse(w http.ResponseWriter, httpResp *http.Response, s
 		flusher.Flush()
 	}
 
-	// Pass the upstream SSE stream through unchanged (including its own
-	// "data: [DONE]"), flushing after every read.
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := httpResp.Body.Read(buf)

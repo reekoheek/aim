@@ -47,13 +47,10 @@ func newRootCmd() *cobra.Command {
 func run(cmd *cobra.Command, args []string) error {
 	l := logger.New(os.Getenv("AIM_LOG_LEVEL"))
 
-	// Determine config path
 	var cfgPath string
 	if cfgFile != "" {
-		// Use explicit path
 		cfgPath = cfgFile
 	} else {
-		// Find in CWD
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("get cwd: %w", err)
@@ -67,26 +64,20 @@ func run(cmd *cobra.Command, args []string) error {
 
 	l.Info("loading config", slog.String("path", cfgPath))
 
-	// Load config
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Validate models
 	if len(cfg.Models) == 0 {
 		return fmt.Errorf("no models configured in %s", cfgPath)
 	}
 
-	// Log configured models
 	for modelID := range cfg.Models {
 		l.Info("configured model", slog.String("id", modelID))
 	}
 
-	// Setup proxy
 	p := proxy.New(cfg, l)
-
-	// Setup server
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
@@ -117,7 +108,6 @@ func run(cmd *cobra.Command, args []string) error {
 		go llamacpp.PruneSlots(slotPruneCtx, serverCfg, l)
 	}
 
-	// Setup signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -129,7 +119,6 @@ func run(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)
-		// Stop llama-server so it does not outlive us holding its port.
 		p.Close(ctx)
 	}()
 
@@ -137,7 +126,6 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server error: %w", err)
 	}
 
-	// ListenAndServe returns as soon as Shutdown begins; wait for it to finish.
 	<-shutdownDone
 	return nil
 }
