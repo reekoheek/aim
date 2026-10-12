@@ -82,6 +82,14 @@ server:
 `,
 		},
 		{
+			name: "slot_expiration not a duration",
+			yaml: `
+server:
+  slot_expiration: 1d
+`,
+			wantErr: true,
+		},
+		{
 			name: "unknown top-level key",
 			yaml: `
 unknown: 1
@@ -290,6 +298,56 @@ models:
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultServerSlotExpiration(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{
+			name: "default",
+			yaml: "",
+			want: time.Hour,
+		},
+		{
+			name: "hours",
+			yaml: `
+server:
+  slot_expiration: 48h
+`,
+			want: 48 * time.Hour,
+		},
+		{
+			name: "minutes",
+			yaml: `
+server:
+  slot_expiration: 90m
+`,
+			want: 90 * time.Minute,
+		},
+		{
+			name: "zero falls back to default",
+			yaml: `
+server:
+  slot_expiration: 0s
+`,
+			want: time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.DefaultServer().SlotExpiration; got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -19,6 +19,7 @@ const (
 	defaultLlamaServerBin = "llama-server"
 	firstSelectorPort     = 10000
 	selectorPortRange     = 55536
+	defaultSlotExpiration = time.Hour
 )
 
 type LlamaCppFlags struct {
@@ -69,9 +70,10 @@ type ProviderEntry struct {
 
 // ServerConfig holds the server listening configuration.
 type ServerConfig struct {
-	Host         string `yaml:"host"`
-	Port         int    `yaml:"port"`
-	SaveSlotPath string `yaml:"save_slot_path"`
+	Host           string        `yaml:"host"`
+	Port           int           `yaml:"port"`
+	SaveSlotPath   string        `yaml:"save_slot_path"`
+	SlotExpiration time.Duration `yaml:"slot_expiration"`
 }
 
 // Config is the full application configuration.
@@ -174,6 +176,9 @@ func (c *Config) DefaultServer() ServerConfig {
 		if dir, err := os.UserCacheDir(); err == nil {
 			c.Server.SaveSlotPath = filepath.Join(dir, "aim", "slots")
 		}
+	}
+	if c.Server.SlotExpiration <= 0 {
+		c.Server.SlotExpiration = defaultSlotExpiration
 	}
 	return c.Server
 }
