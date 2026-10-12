@@ -20,6 +20,7 @@ const (
 	firstSelectorPort     = 10000
 	selectorPortRange     = 55536
 	defaultSlotExpiration = time.Hour
+	defaultSlotMaxFiles   = 3
 )
 
 type LlamaCppFlags struct {
@@ -74,6 +75,7 @@ type ServerConfig struct {
 	Port           int           `yaml:"port"`
 	SaveSlotPath   string        `yaml:"save_slot_path"`
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
+	SlotMaxFiles   int           `yaml:"slot_max_files"`
 }
 
 // Config is the full application configuration.
@@ -179,6 +181,9 @@ func (c *Config) DefaultServer() ServerConfig {
 	}
 	if c.Server.SlotExpiration <= 0 {
 		c.Server.SlotExpiration = defaultSlotExpiration
+	}
+	if c.Server.SlotMaxFiles <= 0 {
+		c.Server.SlotMaxFiles = defaultSlotMaxFiles
 	}
 	return c.Server
 }

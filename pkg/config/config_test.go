@@ -353,6 +353,56 @@ server:
 	}
 }
 
+func TestDefaultServerSlotMaxFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{
+			name: "default",
+			yaml: "",
+			want: 3,
+		},
+		{
+			name: "configured",
+			yaml: `
+server:
+  slot_max_files: 5
+`,
+			want: 5,
+		},
+		{
+			name: "zero falls back to default",
+			yaml: `
+server:
+  slot_max_files: 0
+`,
+			want: 3,
+		},
+		{
+			name: "negative falls back to default",
+			yaml: `
+server:
+  slot_max_files: -1
+`,
+			want: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.DefaultServer().SlotMaxFiles; got != tt.want {
+				t.Errorf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetModelURLLlamaServer(t *testing.T) {
 	tests := []struct {
 		name string
