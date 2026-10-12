@@ -3,6 +3,7 @@ package llamacpp
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +27,10 @@ import (
 )
 
 const (
-	defaultPort  = 8082
-	defaultHost  = "127.0.0.1"
-	startTimeout = 30 * time.Second
-	stopTimeout  = 5 * time.Second
+	defaultPort        = 8082
+	defaultHost        = "127.0.0.1"
+	startTimeout       = 30 * time.Second
+	defaultStopTimeout = 5 * time.Second
 
 	// CacheSlot is the slot that session-cached requests are pinned to.
 	CacheSlot = 0
@@ -43,7 +45,8 @@ type Server struct {
 	bin          string
 	port         int
 	host         string
-	flags        config.LlamaCppFlags
+	flags        map[string]any
+	stopTimeout  time.Duration
 	selector     string
 	slotSavePath string
 	slot         chan struct{} // held by one request at a time while slot caching is on
@@ -60,9 +63,10 @@ type Server struct {
 func NewServer(selector string, entry *config.LlamaCppEntry, slotSavePath string, l *logger.Logger) *Server {
 	return &Server{
 		bin:          entry.Bin,
-		port:         entry.Flags.Port,
+		port:         entry.Port,
 		host:         defaultHost,
 		flags:        entry.Flags,
+		stopTimeout:  cmp.Or(entry.StopTimeout, defaultStopTimeout),
 		selector:     selector,
 		slotSavePath: slotSavePath,
 		slot:         make(chan struct{}, 1),
@@ -87,25 +91,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return s.startErr
 	}
 
-	// Build command arguments
-	args := []string{
-		"-hf", s.flags.HF,
-		"--host", s.host,
-		"--port", fmt.Sprintf("%d", s.flags.Port),
-		"--ctx-size", fmt.Sprintf("%d", s.flags.C),
-		"--flash-attn", s.flags.FA,
-		"--gpu-layers", fmt.Sprintf("%d", s.flags.NGL),
-		"--parallel", fmt.Sprintf("%d", s.flags.NP),
-		"--cache-type-k", s.flags.CTK,
-		"--cache-type-v", s.flags.CTV,
-		"--log-colors", "off",
-		"--temp", fmt.Sprintf("%f", s.flags.Temp),
-		"--top-p", fmt.Sprintf("%f", s.flags.TopP),
-		"--top-k", fmt.Sprintf("%d", s.flags.TopK),
-		"--min-p", fmt.Sprintf("%f", s.flags.MinP),
-		"--presence-penalty", fmt.Sprintf("%f", s.flags.PresencePenalty),
-		"--repeat-penalty", fmt.Sprintf("%f", s.flags.RepeatPenalty),
-	}
+	args := s.args()
 
 	// llama-server does not create the slot save dir itself.
 	if s.slotSavePath != "" {
@@ -237,7 +223,7 @@ func (s *Server) Stop(ctx context.Context) {
 		s.cmd.Process.Signal(os.Interrupt)
 		select {
 		case <-s.done:
-		case <-time.After(stopTimeout):
+		case <-time.After(s.stopTimeout):
 			s.logger.Info("llama.cpp server did not stop in time, killing", slog.Int("pid", s.cmd.Process.Pid))
 			s.cmd.Process.Kill()
 			<-s.done
@@ -273,8 +259,37 @@ func (s *Server) Selector() string {
 }
 
 // GetFlags returns the server flags for logging.
-func (s *Server) GetFlags() config.LlamaCppFlags {
+func (s *Server) GetFlags() map[string]any {
 	return s.flags
+}
+
+func (s *Server) args() []string {
+	return append(flagArgs(s.flags),
+		"--host", s.host,
+		"--port", strconv.Itoa(s.port),
+		"--log-colors", "off",
+	)
+}
+
+func flagArgs(flags map[string]any) []string {
+	names := make([]string, 0, len(flags))
+	for name := range flags {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	var args []string
+	for _, name := range names {
+		switch value := flags[name].(type) {
+		case bool:
+			if value {
+				args = append(args, name)
+			}
+		default:
+			args = append(args, name, fmt.Sprint(value))
+		}
+	}
+	return args
 }
 
 // SlotCacheEnabled reports whether session KV caches are persisted to disk.
