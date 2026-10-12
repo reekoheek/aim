@@ -21,6 +21,7 @@ const (
 	selectorPortRange     = 55536
 	defaultSlotExpiration = time.Hour
 	defaultSlotMaxFiles   = 3
+	defaultInferenceDelay = 1 * time.Second
 )
 
 type LlamaCppFlags struct {
@@ -76,6 +77,7 @@ type ServerConfig struct {
 	SaveSlotPath   string        `yaml:"save_slot_path"`
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
 	SlotMaxFiles   int           `yaml:"slot_max_files"`
+	InferenceDelay time.Duration `yaml:"inference_delay"`
 }
 
 // Config is the full application configuration.
@@ -184,6 +186,9 @@ func (c *Config) DefaultServer() ServerConfig {
 	}
 	if c.Server.SlotMaxFiles <= 0 {
 		c.Server.SlotMaxFiles = defaultSlotMaxFiles
+	}
+	if c.Server.InferenceDelay <= 0 {
+		c.Server.InferenceDelay = defaultInferenceDelay
 	}
 	return c.Server
 }
