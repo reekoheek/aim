@@ -34,7 +34,8 @@ Supported targets: **Linux**, **macOS**, and **Windows** — all native.
 
 ## Special Directories
 
-- None currently
+- `.agents/plans/` — AI-generated plans and design documents
+- `.agents/scripts/` — Reusable scripts for agent use
 
 ## Documentation
 
