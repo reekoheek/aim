@@ -16,7 +16,7 @@ import (
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
 	"github.com/reekoheek/aim/pkg/llamacpp"
-	"github.com/reekoheek/aim/pkg/proxy"
+	"github.com/reekoheek/aim/pkg/router/chatcompletion"
 )
 
 var (
@@ -77,12 +77,12 @@ func run(cmd *cobra.Command, args []string) error {
 		l.Info("configured model", slog.String("id", modelID))
 	}
 
-	p := proxy.New(cfg, l)
+	router := chatcompletion.New(cfg, l)
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", p.Handler)
+	mux.HandleFunc("POST /v1/chat/completions", router.Handler)
 
 	server := &http.Server{
 		Addr:    addr,
@@ -119,7 +119,7 @@ func run(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)
-		p.Close(ctx)
+		router.Close(ctx)
 	}()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
