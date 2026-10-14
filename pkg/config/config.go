@@ -23,6 +23,12 @@ const (
 	defaultSlotMaxFiles   = 3
 	defaultInferenceDelay = 1 * time.Second
 	defaultIdleTimeout    = 5 * time.Minute
+	defaultLlamaServerURL = "http://127.0.0.1:%d"
+)
+
+const (
+	ModelTypeChatCompletion = "chat-completion"
+	ModelTypeLlamaServer    = "llama-server"
 )
 
 type LlamaCppFlags struct {
@@ -75,7 +81,7 @@ type ServerConfig struct {
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
 	SlotMaxFiles   int           `yaml:"slot_max_files"`
 	InferenceDelay time.Duration `yaml:"inference_delay"`
-	IdleTimeout    int           `yaml:"idle_timeout"`
+	IdleTimeout    *int          `yaml:"idle_timeout"`
 }
 
 type Config struct {
@@ -85,40 +91,34 @@ type Config struct {
 	Server    ServerConfig             `yaml:"server"`
 }
 
-func (c *Config) ResolveModel(selector string) (modelType string, info map[string]any, err error) {
+func (c *Config) ResolveModel(selector string) (ModelEntry, error) {
 	entry, ok := c.Models[selector]
 	if !ok {
-		return "", nil, fmt.Errorf("model %q not found in config", selector)
+		return ModelEntry{}, fmt.Errorf("model %q not found in config", selector)
 	}
 	switch entry.Type {
-	case "provider":
-		if entry.Provider == "" {
-			return "", nil, fmt.Errorf("model %q has empty provider", selector)
+	case ModelTypeChatCompletion:
+		if err := c.validateChatCompletion(selector, entry); err != nil {
+			return ModelEntry{}, err
 		}
-		if entry.Model == "" {
-			return "", nil, fmt.Errorf("model %q has empty model name", selector)
-		}
-		if _, ok := c.Providers[entry.Provider]; !ok {
-			return "", nil, fmt.Errorf("provider %q not found in config", entry.Provider)
-		}
-		return "provider", map[string]any{
-			"provider": entry.Provider,
-			"model":    entry.Model,
-		}, nil
-	case "llama-server":
-		url := entry.LlamaCpp.URL
-		if url == "" {
-			url = fmt.Sprintf("http://127.0.0.1:%d", entry.LlamaCpp.Port)
-		}
-		return "llama-server", map[string]any{
-			"bin":      entry.LlamaCpp.Bin,
-			"flags":    entry.LlamaCpp.Flags,
-			"selector": selector,
-			"url":      url,
-		}, nil
+	case ModelTypeLlamaServer:
 	default:
-		return "", nil, fmt.Errorf("model %q has unsupported type %q", selector, entry.Type)
+		return ModelEntry{}, fmt.Errorf("model %q has unsupported type %q", selector, entry.Type)
 	}
+	return entry, nil
+}
+
+func (c *Config) validateChatCompletion(selector string, entry ModelEntry) error {
+	if entry.Provider == "" {
+		return fmt.Errorf("model %q has empty provider", selector)
+	}
+	if entry.Model == "" {
+		return fmt.Errorf("model %q has empty model name", selector)
+	}
+	if _, ok := c.Providers[entry.Provider]; !ok {
+		return fmt.Errorf("provider %q not found in config", entry.Provider)
+	}
+	return nil
 }
 
 func (c *Config) GetProvider(id string) (ProviderEntry, error) {
@@ -137,8 +137,8 @@ func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("model %q not found in config", selector)
 	}
-	if entry.Type != "llama-server" {
-		return nil, fmt.Errorf("model %q is not type llama-server", selector)
+	if entry.Type != ModelTypeLlamaServer {
+		return nil, fmt.Errorf("model %q is not type %s", selector, ModelTypeLlamaServer)
 	}
 	if entry.LlamaCpp == nil {
 		return nil, fmt.Errorf("model %q has no llama.cpp config", selector)
@@ -147,15 +147,11 @@ func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 }
 
 func (c *Config) GetModelURL(selector string) (string, error) {
-	_, info, err := c.ResolveModel(selector)
+	llama, err := c.GetLlamaCppEntry(selector)
 	if err != nil {
 		return "", err
 	}
-	url, ok := info["url"]
-	if !ok || url == "" {
-		return "", fmt.Errorf("model %q has no URL", selector)
-	}
-	return url.(string), nil
+	return cmp.Or(llama.URL, fmt.Sprintf(defaultLlamaServerURL, llama.Port)), nil
 }
 
 func (c *Config) DefaultServer() ServerConfig {
@@ -179,8 +175,9 @@ func (c *Config) DefaultServer() ServerConfig {
 	if c.Server.InferenceDelay <= 0 {
 		c.Server.InferenceDelay = defaultInferenceDelay
 	}
-	if c.Server.IdleTimeout <= 0 {
-		c.Server.IdleTimeout = int(defaultIdleTimeout / time.Second)
+	if c.Server.IdleTimeout == nil {
+		defaultIdleTimeoutSeconds := int(defaultIdleTimeout / time.Second)
+		c.Server.IdleTimeout = &defaultIdleTimeoutSeconds
 	}
 	return c.Server
 }
@@ -209,7 +206,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	for id, entry := range cfg.Models {
-		if entry.Type != "llama-server" {
+		if entry.Type != ModelTypeLlamaServer {
 			continue
 		}
 		llama, err := cfg.newLlamaCppEntry(id, entry)

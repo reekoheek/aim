@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,11 +66,11 @@ func TestLoad(t *testing.T) {
 			yaml: "",
 		},
 		{
-			name: "provider config",
+			name: "chat-completion config",
 			yaml: `
 models:
   remote/m:
-    type: provider
+    type: chat-completion
     provider: p
     model: m
 providers:
@@ -450,11 +451,175 @@ server:
 	}
 }
 
-func TestGetModelURLLlamaServer(t *testing.T) {
+func TestDefaultServerIdleTimeout(t *testing.T) {
 	tests := []struct {
 		name string
 		yaml string
-		want string
+		want int
+	}{
+		{
+			name: "default",
+			yaml: "",
+			want: 300,
+		},
+		{
+			name: "configured",
+			yaml: `
+server:
+  idle_timeout: 120
+`,
+			want: 120,
+		},
+		{
+			name: "zero disables",
+			yaml: `
+server:
+  idle_timeout: 0
+`,
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := cfg.DefaultServer().IdleTimeout
+			if got == nil {
+				t.Fatal("IdleTimeout is nil")
+			}
+			if *got != tt.want {
+				t.Errorf("got %d, want %d", *got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveModel(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector string
+		yaml     string
+		want     ModelEntry
+		wantErr  string
+	}{
+		{
+			name:     "chat-completion",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: chat-completion
+    provider: p
+    model: remote-m
+providers:
+  p:
+    base_url: http://example.com
+`,
+			want: ModelEntry{Type: ModelTypeChatCompletion, Provider: "p", Model: "remote-m"},
+		},
+		{
+			name:     "llama-server",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: llama-server
+`,
+			want: ModelEntry{Type: ModelTypeLlamaServer},
+		},
+		{
+			name:     "model missing from config",
+			selector: "missing",
+			yaml:     "",
+			wantErr:  `model "missing" not found in config`,
+		},
+		{
+			name:     "chat-completion without provider",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: chat-completion
+    model: remote-m
+`,
+			wantErr: `model "m" has empty provider`,
+		},
+		{
+			name:     "chat-completion without model name",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: chat-completion
+    provider: p
+providers:
+  p:
+    base_url: http://example.com
+`,
+			wantErr: `model "m" has empty model name`,
+		},
+		{
+			name:     "chat-completion with provider missing from config",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: chat-completion
+    provider: gone
+    model: remote-m
+`,
+			wantErr: `provider "gone" not found in config`,
+		},
+		{
+			name:     "legacy provider type rejected",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: provider
+    provider: p
+    model: remote-m
+providers:
+  p:
+    base_url: http://example.com
+`,
+			wantErr: `unsupported type "provider"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got, err := cfg.ResolveModel(tt.selector)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("got err %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveModel: %v", err)
+			}
+			if got.Type != tt.want.Type || got.Provider != tt.want.Provider || got.Model != tt.want.Model {
+				t.Errorf("got type %q provider %q model %q, want type %q provider %q model %q",
+					got.Type, got.Provider, got.Model, tt.want.Type, tt.want.Provider, tt.want.Model)
+			}
+		})
+	}
+}
+
+func TestGetModelURLLlamaServer(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    string
+		wantErr string
 	}{
 		{
 			name: "derived from port",
@@ -477,6 +642,17 @@ models:
 `,
 			want: "http://other-host:8080",
 		},
+		{
+			name: "chat-completion model has no llama-server URL",
+			yaml: `
+models:
+  m:
+    type: chat-completion
+    provider: p
+    model: remote-m
+`,
+			wantErr: `model "m" is not type llama-server`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -486,6 +662,12 @@ models:
 				t.Fatalf("Load: %v", err)
 			}
 			got, err := cfg.GetModelURL("m")
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("got err %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("GetModelURL: %v", err)
 			}
