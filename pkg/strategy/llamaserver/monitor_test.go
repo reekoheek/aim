@@ -58,7 +58,13 @@ func currentServer(m *Monitor) *Server {
 	return m.server
 }
 
-func acquire(ctx context.Context, m *Monitor, cfg *config.Config, model string) (*Server, error) {
+func currentSlots(m *Monitor) *slotCache {
+	m.lock <- struct{}{}
+	defer m.unlock()
+	return m.slots
+}
+
+func acquire(ctx context.Context, m *Monitor, cfg *config.Config, model string) (*Server, *slotCache, error) {
 	return m.Acquire(ctx, cfg, testLogger, model)
 }
 
@@ -109,7 +115,7 @@ func waitUntil(t *testing.T, timeout time.Duration, what string, condition func(
 func acquireAsync(m *Monitor, cfg *config.Config, model string) <-chan error {
 	acquired := make(chan error, 1)
 	go func() {
-		srv, err := acquire(context.Background(), m, cfg, model)
+		srv, _, err := acquire(context.Background(), m, cfg, model)
 		if err == nil {
 			srv.ExitRequest()
 		}
@@ -140,12 +146,12 @@ func TestMonitorAcquire(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a", "b")
 			m := newTestMonitor(t)
 
-			first, err := acquire(context.Background(), m, cfg, tt.models[0])
+			first, _, err := acquire(context.Background(), m, cfg, tt.models[0])
 			if err != nil {
 				t.Fatal(err)
 			}
 			first.ExitRequest()
-			second, err := acquire(context.Background(), m, cfg, tt.models[1])
+			second, _, err := acquire(context.Background(), m, cfg, tt.models[1])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,14 +171,14 @@ func TestMonitorAcquireRestartsServerStoppedAfterIdle(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 1, "a")
 	m := newTestMonitor(t)
 
-	first, err := acquire(context.Background(), m, cfg, "a")
+	first, _, err := acquire(context.Background(), m, cfg, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.ExitRequest()
 	waitUntil(t, 5*time.Second, "idle stop", first.Exited)
 
-	second, err := acquire(context.Background(), m, cfg, "a")
+	second, _, err := acquire(context.Background(), m, cfg, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,13 +188,36 @@ func TestMonitorAcquireRestartsServerStoppedAfterIdle(t *testing.T) {
 	}
 }
 
+func TestMonitorIdleStopSavesSlot(t *testing.T) {
+	cfg := newFakeLlamaConfig(t, 1, "a")
+	m := newTestMonitor(t)
+	srv, slots, err := acquire(context.Background(), m, cfg, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := slots.acquire(context.Background(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	srv.ExitRequest()
+
+	waitUntil(t, 5*time.Second, "idle stop", srv.Exited)
+	if _, err := os.Stat(filepath.Join(slots.dir, slots.file("session"))); err != nil {
+		t.Errorf("slot not saved on idle stop: %v", err)
+	}
+	if currentServer(m) != nil || currentSlots(m) != nil {
+		t.Error("monitor still holds the server stopped after idle")
+	}
+}
+
 func TestMonitorAcquireRejectsCanceledRequest(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
 	m := newTestMonitor(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := acquire(ctx, m, cfg, "a"); err == nil {
+	if _, _, err := acquire(ctx, m, cfg, "a"); err == nil {
 		t.Fatal("Acquire succeeded for a canceled request")
 	}
 	if currentServer(m) != nil {
@@ -199,11 +228,11 @@ func TestMonitorAcquireRejectsCanceledRequest(t *testing.T) {
 func TestMonitorSwitchWaitsForInFlightRequest(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a", "b")
 	m := newTestMonitor(t)
-	old, err := acquire(context.Background(), m, cfg, "a")
+	old, slots, err := acquire(context.Background(), m, cfg, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := old.AcquireSlot(context.Background(), "session")
+	release, err := slots.acquire(context.Background(), "session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,11 +262,11 @@ func TestMonitorSwitchWaitsForInFlightRequest(t *testing.T) {
 func TestMonitorCloseInterruptsSwitchWaitingForRequest(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a", "b")
 	m := newTestMonitor(t)
-	old, err := acquire(context.Background(), m, cfg, "a")
+	old, slots, err := acquire(context.Background(), m, cfg, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := old.AcquireSlot(context.Background(), "session")
+	release, err := slots.acquire(context.Background(), "session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +289,7 @@ func TestMonitorCloseInterruptsSwitchWaitingForRequest(t *testing.T) {
 	if !old.Exited() {
 		t.Error("old server still running after close")
 	}
-	if _, err := acquire(context.Background(), m, cfg, "a"); err != errMonitorClosed {
+	if _, _, err := acquire(context.Background(), m, cfg, "a"); err != errMonitorClosed {
 		t.Errorf("Acquire after close: error %v, want %v", err, errMonitorClosed)
 	}
 }
@@ -278,11 +307,11 @@ func TestMonitorAcquireGivesUpWaitingForSwitchWhenRequestCanceled(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a", "b")
 			m := newTestMonitor(t)
-			old, err := acquire(context.Background(), m, cfg, "a")
+			old, slots, err := acquire(context.Background(), m, cfg, "a")
 			if err != nil {
 				t.Fatal(err)
 			}
-			release, err := old.AcquireSlot(context.Background(), "session")
+			release, err := slots.acquire(context.Background(), "session")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -293,7 +322,7 @@ func TestMonitorAcquireGivesUpWaitingForSwitchWhenRequestCanceled(t *testing.T) 
 			ctx, cancel := context.WithCancel(context.Background())
 			waiting := make(chan error, 1)
 			go func() {
-				srv, err := acquire(ctx, m, cfg, tt.model)
+				srv, _, err := acquire(ctx, m, cfg, tt.model)
 				if err == nil {
 					srv.ExitRequest()
 				}
@@ -317,7 +346,7 @@ func TestMonitorAcquireGivesUpWaitingForSwitchWhenRequestCanceled(t *testing.T) 
 func TestMonitorCloseStopsServerOnceSwitchOutlastsDeadline(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
 	m := newTestMonitor(t)
-	srv, err := acquire(context.Background(), m, cfg, "a")
+	srv, _, err := acquire(context.Background(), m, cfg, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,11 +412,11 @@ func TestMonitorAcquireLeavesServerForCloseOnceShutdownBegins(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a", "b")
 			m := newTestMonitor(t)
-			old, err := acquire(context.Background(), m, cfg, "a")
+			old, slots, err := acquire(context.Background(), m, cfg, "a")
 			if err != nil {
 				t.Fatal(err)
 			}
-			release, err := old.AcquireSlot(context.Background(), "session")
+			release, err := slots.acquire(context.Background(), "session")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -395,7 +424,7 @@ func TestMonitorAcquireLeavesServerForCloseOnceShutdownBegins(t *testing.T) {
 			old.ExitRequest()
 
 			m.closeLifetime()
-			if _, err := acquire(context.Background(), m, cfg, tt.model); err != errMonitorClosed {
+			if _, _, err := acquire(context.Background(), m, cfg, tt.model); err != errMonitorClosed {
 				t.Errorf("Acquire during shutdown: error %v, want %v", err, errMonitorClosed)
 			}
 			if old.Exited() {
@@ -409,7 +438,7 @@ func TestMonitorAcquireLeavesServerForCloseOnceShutdownBegins(t *testing.T) {
 			if !old.Exited() {
 				t.Error("server still running after close")
 			}
-			if _, err := os.Stat(filepath.Join(old.slotSavePath, old.slotFile("session"))); err != nil {
+			if _, err := os.Stat(filepath.Join(slots.dir, slots.file("session"))); err != nil {
 				t.Errorf("slot not saved on close: %v", err)
 			}
 		})

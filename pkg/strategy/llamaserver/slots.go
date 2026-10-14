@@ -1,13 +1,23 @@
 package llamaserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/reekoheek/aim/internal/logger"
@@ -15,11 +25,219 @@ import (
 )
 
 const (
+	cacheSlot             = 0
+	slotSavePathFlag      = "--slot-save-path"
 	slotFileExtension     = ".bin"
+	slotFileSeparator     = "--"
+	sessionDigestLength   = 16
 	maxSlotSweepInterval  = time.Hour
 	slotPruneReasonExpiry = "expired"
 	slotPruneReasonLimit  = "over limit"
 )
+
+var errServerExited = errors.New("llama.cpp server has exited")
+
+var slotClient = &http.Client{Timeout: time.Minute}
+
+var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+type slotCache struct {
+	dir        string
+	selector   string
+	baseURL    string
+	expiration time.Duration
+	maxFiles   int
+	logger     *logger.Logger
+	done       <-chan struct{}
+	slot       chan struct{}
+	session    string
+	unsaved    bool
+}
+
+func newSlotCache(dir string, selector string, baseURL string, server config.ServerConfig, l *logger.Logger, done <-chan struct{}) *slotCache {
+	return &slotCache{
+		dir:        dir,
+		selector:   selector,
+		baseURL:    baseURL,
+		expiration: server.SlotExpiration,
+		maxFiles:   server.SlotMaxFiles,
+		logger:     l,
+		done:       done,
+		slot:       make(chan struct{}, 1),
+	}
+}
+
+func prepareSlotDir(path string) (string, error) {
+	dir, err := filepath.Abs(path)
+	if err == nil {
+		err = os.MkdirAll(dir, 0o755)
+	}
+	if err != nil {
+		return "", fmt.Errorf("slot save path %q: %w", path, err)
+	}
+	return dir, nil
+}
+
+func withSlotSavePath(entry *config.LlamaCppEntry, dir string) *config.LlamaCppEntry {
+	withSlots := *entry
+	withSlots.Flags = make(map[string]any, len(entry.Flags)+1)
+	maps.Copy(withSlots.Flags, entry.Flags)
+	withSlots.Flags[slotSavePathFlag] = dir
+	return &withSlots
+}
+
+func (c *slotCache) acquire(ctx context.Context, sessionID string) (release func(), err error) {
+	start := time.Now()
+	select {
+	case c.slot <- struct{}{}:
+	case <-c.done:
+		return nil, errServerExited
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	acquired := time.Now()
+	c.logger.Info("slot acquired",
+		slog.Int("slot", cacheSlot),
+		slog.String("session", sessionID),
+		slog.Duration("waited", acquired.Sub(start)),
+	)
+
+	if c.session != sessionID {
+		c.markUsed(sessionID)
+		c.saveUnsaved()
+		c.session = ""
+		if sessionID != "" && c.restore(sessionID) {
+			c.session = sessionID
+		}
+		c.prune()
+	}
+
+	return func() {
+		defer func() { <-c.slot }()
+
+		if sessionID != "" {
+			c.session = sessionID
+			c.unsaved = true
+		}
+
+		c.logger.Info("slot released",
+			slog.Int("slot", cacheSlot),
+			slog.String("session", sessionID),
+			slog.Duration("held", time.Since(acquired)),
+		)
+	}, nil
+}
+
+func (c *slotCache) pin(fields map[string]json.RawMessage) {
+	fields["id_slot"], _ = json.Marshal(cacheSlot)
+	fields["cache_prompt"], _ = json.Marshal(true)
+}
+
+func (c *slotCache) shutdown(ctx context.Context) {
+	select {
+	case c.slot <- struct{}{}:
+		if !c.processExited() {
+			c.saveUnsaved()
+			c.prune()
+		}
+	case <-c.done:
+	case <-ctx.Done():
+	}
+}
+
+func (c *slotCache) processExited() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *slotCache) saveUnsaved() {
+	if c.session == "" || !c.unsaved {
+		return
+	}
+	file := c.file(c.session)
+	c.unsaved = false
+	if err := c.action("save", file); err != nil {
+		c.logger.LogError("failed to save slot", err, slog.String("session", c.session), slog.String("file", file))
+	}
+}
+
+func (c *slotCache) prune() {
+	pruned, err := pruneSlots(c.dir, c.expiration, c.maxFiles, time.Now())
+	logPrunedSlots(c.logger, c.dir, pruned, err)
+}
+
+func (c *slotCache) markUsed(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	file := c.file(sessionID)
+	if err := touchSlotFile(filepath.Join(c.dir, file), time.Now()); err != nil {
+		c.logger.LogError("failed to mark slot cache as used", err, slog.String("session", sessionID), slog.String("file", file))
+	}
+}
+
+func (c *slotCache) restore(sessionID string) bool {
+	file := c.file(sessionID)
+	if _, err := os.Stat(filepath.Join(c.dir, file)); err != nil {
+		return true
+	}
+	if err := c.action("restore", file); err != nil {
+		c.logger.LogError("failed to restore slot", err, slog.String("session", sessionID), slog.String("file", file))
+		return false
+	}
+	return true
+}
+
+func (c *slotCache) file(sessionID string) string {
+	return sanitizeFileName(c.selector) + slotFileSeparator + sessionDigest(sessionID) + slotFileExtension
+}
+
+func sessionDigest(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])[:sessionDigestLength]
+}
+
+func sanitizeFileName(id string) string {
+	return unsafeFileNameChars.ReplaceAllString(id, "--")
+}
+
+func (c *slotCache) action(action string, file string) error {
+	start := time.Now()
+	url := fmt.Sprintf("%s/slots/%d?action=%s", c.baseURL, cacheSlot, action)
+	payload, err := json.Marshal(map[string]string{"filename": file})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	resp, err := slotClient.Post(url, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("%s slot %d: %w", action, cacheSlot, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s slot %d: status %d: %s", action, cacheSlot, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var res struct {
+		NSaved    int `json:"n_saved"`
+		NRestored int `json:"n_restored"`
+	}
+	_ = json.Unmarshal(body, &res)
+
+	c.logger.Info("slot cache", slog.String("action", action),
+		slog.Int("slot", cacheSlot),
+		slog.String("file", file),
+		slog.Int("tokens", res.NSaved+res.NRestored),
+		slog.Duration("took", time.Since(start)),
+	)
+	return nil
+}
 
 type prunedSlot struct {
 	name   string

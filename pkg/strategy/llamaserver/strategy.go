@@ -39,7 +39,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		return
 	}
 
-	srv, err := s.monitor.Acquire(ctx, s.cfg, s.logger, s.selector)
+	srv, slots, err := s.monitor.Acquire(ctx, s.cfg, s.logger, s.selector)
 	if err != nil {
 		s.logger.LogError("failed to acquire llama server", err, slog.String("selector", s.selector))
 		strategy.WriteError(w, acquireErrorStatus(err), strategy.ErrorTypeServer, err.Error())
@@ -48,9 +48,9 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 
 	defer srv.ExitRequest()
 
-	if srv.SlotCacheEnabled() {
+	if slots != nil {
 		session := req.SessionID()
-		release, err := srv.AcquireSlot(ctx, session)
+		release, err := slots.acquire(ctx, session)
 		if err != nil {
 			s.logger.LogError("failed to acquire slot", err, slog.String("session", session))
 			strategy.WriteError(w, http.StatusServiceUnavailable, strategy.ErrorTypeServer, err.Error())
@@ -58,8 +58,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		}
 		defer release()
 
-		fields["id_slot"], _ = json.Marshal(CacheSlot)
-		fields["cache_prompt"], _ = json.Marshal(true)
+		slots.pin(fields)
 		body, _ := json.Marshal(fields)
 		req.Body = body
 	}

@@ -8,13 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -127,7 +124,7 @@ func TestServerArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", tt.entry, config.ServerConfig{}, nil).args()
+			got := NewServer("m", tt.entry, config.ServerConfig{}, nil, nil).args()
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
@@ -147,7 +144,7 @@ func TestNewServerStopTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil).stopTimeout
+			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil, nil).stopTimeout
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
@@ -167,204 +164,9 @@ func TestNewServerInferenceDelay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", &config.LlamaCppEntry{}, config.ServerConfig{InferenceDelay: tt.delay}, nil).inferenceDelay
+			got := NewServer("m", &config.LlamaCppEntry{}, config.ServerConfig{InferenceDelay: tt.delay}, nil, nil).inferenceDelay
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-type fakeSlotServer struct {
-	mu          sync.Mutex
-	dir         string
-	failRestore map[string]bool
-	actions     []string
-}
-
-func (f *fakeSlotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Filename string `json:"filename"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	action := r.URL.Query().Get("action")
-
-	f.mu.Lock()
-	f.actions = append(f.actions, action+" "+body.Filename)
-	f.mu.Unlock()
-
-	switch {
-	case action == "restore" && f.failRestore[body.Filename]:
-		http.Error(w, "restore failed", http.StatusInternalServerError)
-	case action == "save":
-		path := filepath.Join(f.dir, body.Filename)
-		if err := os.WriteFile(path, []byte("kv"), 0o644); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		savedAt := time.Now()
-		if err := os.Chtimes(path, savedAt, savedAt); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprint(w, `{"n_saved": 1}`)
-	default:
-		fmt.Fprint(w, `{"n_restored": 1}`)
-	}
-}
-
-func (f *fakeSlotServer) recorded() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.actions)
-}
-
-func newSlotTestServer(t *testing.T, existing []string, failRestore []string, stopTimeout time.Duration, maxFiles int) (*Server, *fakeSlotServer) {
-	t.Helper()
-	dir := t.TempDir()
-	fake := &fakeSlotServer{dir: dir, failRestore: map[string]bool{}}
-	httpServer := httptest.NewServer(fake)
-	t.Cleanup(httpServer.Close)
-
-	entry := &config.LlamaCppEntry{
-		Port:        httpServer.Listener.Addr().(*net.TCPAddr).Port,
-		StopTimeout: stopTimeout,
-	}
-	server := config.ServerConfig{SaveSlotPath: dir, SlotExpiration: time.Hour, SlotMaxFiles: maxFiles}
-	srv := NewServer("m", entry, server, logger.New("ERROR"))
-	for _, session := range existing {
-		if err := os.WriteFile(filepath.Join(dir, srv.slotFile(session)), []byte("kv"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, session := range failRestore {
-		fake.failRestore[srv.slotFile(session)] = true
-	}
-	return srv, fake
-}
-
-func runSlotRequests(t *testing.T, srv *Server, sessions []string) {
-	t.Helper()
-	for _, session := range sessions {
-		release, err := srv.AcquireSlot(context.Background(), session)
-		if err != nil {
-			t.Fatalf("AcquireSlot(%q): %v", session, err)
-		}
-		release()
-	}
-}
-
-func expectedActions(srv *Server, actions []string) []string {
-	var expected []string
-	for _, action := range actions {
-		name, session, _ := strings.Cut(action, " ")
-		expected = append(expected, name+" "+srv.slotFile(session))
-	}
-	return expected
-}
-
-func TestAcquireSlotSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
-	tests := []struct {
-		name        string
-		existing    []string
-		failRestore []string
-		requests    []string
-		want        []string
-	}{
-		{
-			name:     "same session reuses the slot without save or restore",
-			requests: []string{"a", "a", "a"},
-			want:     nil,
-		},
-		{
-			name:     "switching session saves the previous one",
-			requests: []string{"a", "b"},
-			want:     []string{"save a"},
-		},
-		{
-			name:     "switching back restores the saved session",
-			requests: []string{"a", "b", "a"},
-			want:     []string{"save a", "save b", "restore a"},
-		},
-		{
-			name:     "existing cache is restored on the first request",
-			existing: []string{"a"},
-			requests: []string{"a", "a"},
-			want:     []string{"restore a"},
-		},
-		{
-			name:        "session is saved after a failed restore",
-			existing:    []string{"a"},
-			failRestore: []string{"a"},
-			requests:    []string{"a", "b"},
-			want:        []string{"restore a", "save a"},
-		},
-		{
-			name:     "session-less request evicts the session",
-			requests: []string{"a", "", "a"},
-			want:     []string{"save a", "restore a"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newSlotTestServer(t, tt.existing, tt.failRestore, 0, 0)
-			runSlotRequests(t, srv, tt.requests)
-			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
-				t.Errorf("got %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-func TestAcquireSlotKeepsRecentlyUsedSlotFiles(t *testing.T) {
-	tests := []struct {
-		name      string
-		maxFiles  int
-		requests  []string
-		want      []string
-		wantFiles []string
-	}{
-		{
-			name:      "least recently used session removed over the limit",
-			maxFiles:  2,
-			requests:  []string{"a", "b", "c", "d"},
-			want:      []string{"save a", "save b", "save c"},
-			wantFiles: []string{"b", "c"},
-		},
-		{
-			name:      "requested session counts as used before the limit is applied",
-			maxFiles:  2,
-			requests:  []string{"a", "b", "c", "a"},
-			want:      []string{"save a", "save b", "save c", "restore a"},
-			wantFiles: []string{"a", "c"},
-		},
-		{
-			name:      "requested session is restored before the limit is applied",
-			maxFiles:  1,
-			requests:  []string{"a", "b", "a"},
-			want:      []string{"save a", "save b", "restore a"},
-			wantFiles: []string{"b"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newSlotTestServer(t, nil, nil, 0, tt.maxFiles)
-			runSlotRequests(t, srv, tt.requests)
-			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
-				t.Errorf("actions %q, want %q", got, want)
-			}
-			var wantFiles []string
-			for _, session := range tt.wantFiles {
-				wantFiles = append(wantFiles, srv.slotFile(session))
-			}
-			slices.Sort(wantFiles)
-			if got := remainingNames(t, srv.slotSavePath); !slices.Equal(got, wantFiles) {
-				t.Errorf("files %q, want %q", got, wantFiles)
 			}
 		})
 	}
@@ -393,115 +195,18 @@ func startHelperProcess(t *testing.T, srv *Server) {
 	}()
 }
 
-func TestStopSavesUnsavedSlot(t *testing.T) {
-	tests := []struct {
-		name     string
-		requests []string
-		want     []string
-	}{
-		{
-			name:     "unsaved session is saved",
-			requests: []string{"a"},
-			want:     []string{"save a"},
-		},
-		{
-			name:     "session-less request leaves nothing to save",
-			requests: []string{""},
-			want:     nil,
-		},
-		{
-			name:     "session saved on switch is not saved again",
-			requests: []string{"a", "b"},
-			want:     []string{"save a", "save b"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv, fake := newSlotTestServer(t, nil, nil, time.Second, 0)
-			startHelperProcess(t, srv)
-			runSlotRequests(t, srv, tt.requests)
-			srv.Stop(context.Background())
-			if got, want := fake.recorded(), expectedActions(srv, tt.want); !slices.Equal(got, want) {
-				t.Errorf("got %q, want %q", got, want)
-			}
-			if !srv.Exited() {
-				t.Error("process still running after Stop")
-			}
-		})
-	}
-}
-
-func TestSlotFileNamesModelAndSession(t *testing.T) {
-	tests := []struct {
-		selector string
-		session  string
-		want     string
-	}{
-		{"qwen3.6-35b", "simple", "qwen3.6-35b--a7a39b72f29718e6.bin"},
-		{"qwen3.6-35b", "a/b", "qwen3.6-35b--c14cddc033f64b9d.bin"},
-		{"qwen3.6-35b", "a:b", "qwen3.6-35b--6783a31eabf68ccc.bin"},
-		{"org/model", "simple", "org--model--a7a39b72f29718e6.bin"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.selector+" "+tt.session, func(t *testing.T) {
-			srv := &Server{selector: tt.selector}
-			if got := srv.slotFile(tt.session); got != tt.want {
-				t.Errorf("slotFile(%q) = %q, want %q", tt.session, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestSlotFileSeparatesModelsAndSessions(t *testing.T) {
-	type slotOwner struct {
-		selector string
-		session  string
-	}
-	tests := []struct {
-		name  string
-		first slotOwner
-		other slotOwner
-	}{
-		{"different models", slotOwner{"qwen3.6-35b", "session"}, slotOwner{"lfm2.5-24b", "session"}},
-		{"same architecture models", slotOwner{"qwen3.6-35b", "session"}, slotOwner{"cyber-tiel", "session"}},
-		{"selector and session split differently", slotOwner{"org/model", "simple"}, slotOwner{"org", "model/simple"}},
-		{"sessions differing only in unsafe characters", slotOwner{"m", "a/b"}, slotOwner{"m", "a:b"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			first := (&Server{selector: tt.first.selector}).slotFile(tt.first.session)
-			other := (&Server{selector: tt.other.selector}).slotFile(tt.other.session)
-			if first == other {
-				t.Errorf("%+v and %+v share slot file %q", tt.first, tt.other, first)
-			}
-		})
-	}
-}
-
-func TestSlotFileStaysPathSafe(t *testing.T) {
-	for _, session := range []string{"a/b", "a\\b", "../escape", "with unicode ñ", ""} {
-		name := (&Server{selector: "org/model"}).slotFile(session)
-		if strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, slotFileExtension) {
-			t.Errorf("slotFile(%q) = %q is not a plain %s file name", session, name, slotFileExtension)
-		}
-	}
-}
-
-func TestSanitizeFileNameStaysPathSafe(t *testing.T) {
-	for _, id := range []string{"a/b", "a\\b", "../escape", "a b/c", "hijau:12"} {
-		name := sanitizeFileName(id)
-		if strings.ContainsAny(name, `/\`) {
-			t.Errorf("sanitizeFileName(%q) = %q still contains path separators", id, name)
-		}
-	}
+func stopOnIdle(srv *Server) {
+	srv.Stop()
 }
 
 func newIdleTestServer(t *testing.T, idleTimeout time.Duration) *Server {
 	t.Helper()
-	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{}, logger.New("ERROR"))
+	return newIdleTestServerNotifying(t, idleTimeout, stopOnIdle)
+}
+
+func newIdleTestServerNotifying(t *testing.T, idleTimeout time.Duration, onIdle func(*Server)) *Server {
+	t.Helper()
+	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{}, logger.New("ERROR"), onIdle)
 	srv.idleTimeout = idleTimeout
 	startHelperProcess(t, srv)
 	t.Cleanup(func() { srv.cmd.Process.Kill() })
@@ -614,13 +319,27 @@ func TestStopDisarmsIdleTimerAndRejectsRequests(t *testing.T) {
 	srv := newIdleTestServer(t, time.Hour)
 	srv.startIdleTimer()
 
-	srv.Stop(context.Background())
+	srv.Stop()
 
 	if srv.idleTimer != nil {
 		t.Error("idle timer still armed after Stop")
 	}
 	if srv.EnterRequest() {
 		t.Error("EnterRequest accepted a request on a stopped server")
+	}
+}
+
+func TestIdleTimeoutLeavesStopToOnIdle(t *testing.T) {
+	idled := make(chan *Server, 1)
+	srv := newIdleTestServerNotifying(t, 200*time.Millisecond, func(srv *Server) { idled <- srv })
+	srv.startIdleTimer()
+
+	if got := receiveWithin(t, idled, 2*time.Second, "idle notification"); got != srv {
+		t.Errorf("onIdle received %p, want %p", got, srv)
+	}
+	expectRunningFor(t, srv, 300*time.Millisecond, "without onIdle stopping it")
+	if srv.EnterRequest() {
+		t.Error("EnterRequest accepted a request on a server reported idle")
 	}
 }
 
@@ -660,7 +379,7 @@ func TestStartAbortsWhenContextCanceled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(fakeLlamaServerEnv, tt.mode)
-			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{InferenceDelay: tt.inferenceDelay}, logger.New("ERROR"))
+			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{InferenceDelay: tt.inferenceDelay}, logger.New("ERROR"), nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -705,7 +424,7 @@ func TestIdleTimeoutDuration(t *testing.T) {
 
 func TestNewServerIdleTimeoutZeroNeverStops(t *testing.T) {
 	disabled := 0
-	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{IdleTimeout: &disabled}, logger.New("ERROR"))
+	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{IdleTimeout: &disabled}, logger.New("ERROR"), nil)
 	startHelperProcess(t, srv)
 	t.Cleanup(func() { srv.cmd.Process.Kill() })
 

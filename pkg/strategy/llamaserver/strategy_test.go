@@ -51,8 +51,8 @@ func TestHandleSwitchesModelWhileRequestInFlight(t *testing.T) {
 
 	first := handleAsync(m, cfg, "a", 800*time.Millisecond)
 	waitUntil(t, handleTimeout, "first request holding the slot", func() bool {
-		srv := currentServer(m)
-		return srv != nil && len(srv.slot) == 1
+		slots := currentSlots(m)
+		return slots != nil && len(slots.slot) == 1
 	})
 	second := handleAsync(m, cfg, "b", 0)
 
@@ -97,9 +97,9 @@ func TestHandleKeepsSlotForSessionWhateverTheUpstreamStatus(t *testing.T) {
 			if recorder.Code != tt.status {
 				t.Fatalf("status %d, want %d", recorder.Code, tt.status)
 			}
-			srv := currentServer(m)
-			if srv.slotSession != "session" || !srv.slotUnsaved {
-				t.Errorf("slot session %q unsaved %v, want %q unsaved true", srv.slotSession, srv.slotUnsaved, "session")
+			slots := currentSlots(m)
+			if slots.session != "session" || !slots.unsaved {
+				t.Errorf("slot session %q unsaved %v, want %q unsaved true", slots.session, slots.unsaved, "session")
 			}
 		})
 	}
@@ -261,7 +261,7 @@ func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
 			}
-			if got := currentServer(m).slotSession; got != tt.want {
+			if got := currentSlots(m).session; got != tt.want {
 				t.Errorf("slot session %q, want %q", got, tt.want)
 			}
 		})
