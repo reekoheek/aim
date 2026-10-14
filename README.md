@@ -17,11 +17,11 @@ Create `.aim.yaml` in your working directory:
 ```yaml
 models:
   banyu-minipc/qwen3.6-35b:
-    type: provider
+    type: chat-completion
     provider: banyu-minipc
     model: qwen3.6-35b
   openai/gpt-4:
-    type: provider
+    type: chat-completion
     provider: openai
     model: gpt-4
 
@@ -39,7 +39,7 @@ server:
   save_slot_path: /var/cache/aim/slots # optional, default: <user cache dir>/aim/slots
   slot_expiration: 1h                  # optional, default: 1h
   slot_max_files: 3                    # optional, default: 3
-  idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m)
+  idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m, 0 = never)
 ```
 
 Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path` when another session takes over the slot (or llama-server stops), and restored when that session comes back. A file counts as used when it is saved or when its session is requested again:
