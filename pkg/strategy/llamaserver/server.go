@@ -1,10 +1,12 @@
-package llamacpp
+package llamaserver
 
 import (
 	"bufio"
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +31,7 @@ const (
 	defaultPort           = 8082
 	defaultHost           = "127.0.0.1"
 	startTimeout          = 30 * time.Second
+	healthPollInterval    = 500 * time.Millisecond
 	defaultStopTimeout    = 5 * time.Second
 	defaultInferenceDelay = 1 * time.Second
 	defaultIdleTimeout    = 5 * time.Minute
@@ -60,9 +63,11 @@ type Server struct {
 	started        bool
 	startErr       error
 
-	idleMu    sync.Mutex
-	idleTimer *time.Timer
-	active    int
+	idleMu         sync.Mutex
+	idleTimer      *time.Timer
+	idleGeneration uint64
+	active         int
+	stopping       bool
 }
 
 func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) *Server {
@@ -162,21 +167,17 @@ func (s *Server) Start(ctx context.Context) error {
 		close(done)
 	}()
 
-	if err := s.waitReady(done); err != nil {
-		s.startErr = err
-		s.cmd.Process.Kill()
-		<-done
-		s.logger.LogError("llama.cpp server failed to start", err)
-		return err
+	if err := s.waitReady(ctx, done); err != nil {
+		return s.abortStart(err, done)
+	}
+
+	s.logger.Info("llama.cpp server ready", slog.String("addr", addr))
+
+	if err := s.waitInferenceDelay(ctx, done); err != nil {
+		return s.abortStart(err, done)
 	}
 
 	s.started = true
-	s.logger.Info("llama.cpp server ready", slog.String("addr", addr))
-
-	if s.inferenceDelay > 0 {
-		s.logger.Info("waiting for inference delay", slog.Duration("delay", s.inferenceDelay))
-		<-time.After(s.inferenceDelay)
-	}
 
 	if s.startIdleTimer() {
 		s.logger.Info("llama.cpp server idle timeout", slog.Duration("timeout", s.idleTimeout))
@@ -185,11 +186,34 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) waitReady(done <-chan struct{}) error {
+func (s *Server) abortStart(err error, done <-chan struct{}) error {
+	s.startErr = err
+	s.cmd.Process.Kill()
+	<-done
+	s.logger.LogError("llama.cpp server failed to start", err)
+	return err
+}
+
+func (s *Server) waitInferenceDelay(ctx context.Context, done <-chan struct{}) error {
+	if s.inferenceDelay <= 0 {
+		return nil
+	}
+	s.logger.Info("waiting for inference delay", slog.Duration("delay", s.inferenceDelay))
+	select {
+	case <-time.After(s.inferenceDelay):
+		return nil
+	case <-done:
+		return fmt.Errorf("server exited during startup")
+	case <-ctx.Done():
+		return fmt.Errorf("server startup canceled: %w", ctx.Err())
+	}
+}
+
+func (s *Server) waitReady(ctx context.Context, done <-chan struct{}) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.After(startTimeout)
 	for {
-		resp, err := client.Get(s.URL() + "/health")
+		resp, err := s.healthCheck(ctx, client)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -201,12 +225,27 @@ func (s *Server) waitReady(done <-chan struct{}) error {
 			return fmt.Errorf("server exited during startup")
 		case <-deadline:
 			return fmt.Errorf("server did not become ready within %v", startTimeout)
-		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return fmt.Errorf("server startup canceled: %w", ctx.Err())
+		case <-time.After(healthPollInterval):
 		}
 	}
 }
 
+func (s *Server) healthCheck(ctx context.Context, client *http.Client) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL()+"/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
+}
+
 func (s *Server) Stop(ctx context.Context) {
+	s.idleMu.Lock()
+	s.stopping = true
+	s.disarmIdleTimer()
+	s.idleMu.Unlock()
+
 	select {
 	case s.slot <- struct{}{}:
 		if s.done != nil && !s.Exited() {
@@ -239,25 +278,27 @@ func (s *Server) Stop(ctx context.Context) {
 	s.started = false
 }
 
-func (s *Server) EnterRequest() {
+func (s *Server) EnterRequest() bool {
 	s.idleMu.Lock()
-	if s.idleTimer != nil {
-		s.idleTimer.Stop()
-		s.idleTimer = nil
+	defer s.idleMu.Unlock()
+
+	if s.stopping {
+		return false
 	}
+	s.disarmIdleTimer()
 	s.active++
-	s.idleMu.Unlock()
+	return true
 }
 
 func (s *Server) ExitRequest() {
 	s.idleMu.Lock()
+	defer s.idleMu.Unlock()
+
 	s.active--
-	if s.active > 0 || s.idleTimeout <= 0 {
-		s.idleMu.Unlock()
+	if s.active > 0 || s.idleTimeout <= 0 || s.stopping {
 		return
 	}
 	s.armIdleTimer()
-	s.idleMu.Unlock()
 }
 
 func (s *Server) startIdleTimer() bool {
@@ -271,25 +312,40 @@ func (s *Server) startIdleTimer() bool {
 }
 
 func (s *Server) armIdleTimer() {
+	s.disarmIdleTimer()
+	generation := s.idleGeneration
 	s.idleTimer = time.AfterFunc(s.idleTimeout, func() {
-		s.idleMu.Lock()
-		if s.active > 0 {
-			s.armIdleTimer()
-			s.idleMu.Unlock()
-			return
-		}
-		s.idleTimer = nil
-		s.idleMu.Unlock()
-		s.logger.Info("stopping llama.cpp server after idle", slog.Duration("timeout", s.idleTimeout))
-		s.Stop(context.Background())
+		s.stopIfIdle(generation)
 	})
 }
 
-func idleTimeoutDuration(seconds int) time.Duration {
-	if seconds <= 0 {
+func (s *Server) disarmIdleTimer() {
+	s.idleGeneration++
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+}
+
+func (s *Server) stopIfIdle(generation uint64) {
+	s.idleMu.Lock()
+	if generation != s.idleGeneration || s.active > 0 || s.stopping {
+		s.idleMu.Unlock()
+		return
+	}
+	s.stopping = true
+	s.idleTimer = nil
+	s.idleMu.Unlock()
+
+	s.logger.Info("stopping llama.cpp server after idle", slog.Duration("timeout", s.idleTimeout))
+	s.Stop(context.Background())
+}
+
+func idleTimeoutDuration(seconds *int) time.Duration {
+	if seconds == nil {
 		return defaultIdleTimeout
 	}
-	return time.Duration(seconds) * time.Second
+	return time.Duration(*seconds) * time.Second
 }
 
 func (s *Server) Exited() bool {
@@ -357,7 +413,7 @@ func (s *Server) SlotCacheEnabled() bool {
 	return s.slotSavePath != ""
 }
 
-func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release func(keep bool), err error) {
+func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release func(), err error) {
 	start := time.Now()
 	select {
 	case s.slot <- struct{}{}:
@@ -383,10 +439,10 @@ func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release fun
 		s.pruneSlotFiles()
 	}
 
-	return func(keep bool) {
+	return func() {
 		defer func() { <-s.slot }()
 
-		if keep && sessionID != "" {
+		if sessionID != "" {
 			s.slotSession = sessionID
 			s.slotUnsaved = true
 		}
@@ -394,7 +450,6 @@ func (s *Server) AcquireSlot(ctx context.Context, sessionID string) (release fun
 		s.logger.Info("slot released",
 			slog.Int("slot", CacheSlot),
 			slog.String("session", sessionID),
-			slog.Bool("kept", keep),
 			slog.Duration("held", time.Since(acquired)),
 		)
 	}, nil
@@ -439,7 +494,17 @@ func (s *Server) restoreSlot(sessionID string) bool {
 }
 
 func (s *Server) slotFile(sessionID string) string {
-	return sanitizeFileName(sessionID) + ".bin"
+	return sanitizeFileName(s.selector) + slotFileSeparator + sessionDigest(sessionID) + slotFileExtension
+}
+
+const (
+	slotFileSeparator   = "--"
+	sessionDigestLength = 16
+)
+
+func sessionDigest(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:])[:sessionDigestLength]
 }
 
 var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -448,7 +513,7 @@ func sanitizeFileName(id string) string {
 	return unsafeFileNameChars.ReplaceAllString(id, "--")
 }
 
-func (s *Server) slotAction(action, file string) error {
+func (s *Server) slotAction(action string, file string) error {
 	start := time.Now()
 	url := fmt.Sprintf("http://%s:%d/slots/%d?action=%s", s.host, s.port, CacheSlot, action)
 	payload, err := json.Marshal(map[string]string{"filename": file})

@@ -1,9 +1,11 @@
-package llamacpp
+package llamaserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -220,11 +222,6 @@ func (f *fakeSlotServer) recorded() []string {
 	return slices.Clone(f.actions)
 }
 
-type slotRequest struct {
-	session string
-	keep    bool
-}
-
 func newSlotTestServer(t *testing.T, existing []string, failRestore []string, stopTimeout time.Duration, maxFiles int) (*Server, *fakeSlotServer) {
 	t.Helper()
 	dir := t.TempDir()
@@ -249,14 +246,14 @@ func newSlotTestServer(t *testing.T, existing []string, failRestore []string, st
 	return srv, fake
 }
 
-func runSlotRequests(t *testing.T, srv *Server, requests []slotRequest) {
+func runSlotRequests(t *testing.T, srv *Server, sessions []string) {
 	t.Helper()
-	for _, request := range requests {
-		release, err := srv.AcquireSlot(context.Background(), request.session)
+	for _, session := range sessions {
+		release, err := srv.AcquireSlot(context.Background(), session)
 		if err != nil {
-			t.Fatalf("AcquireSlot(%q): %v", request.session, err)
+			t.Fatalf("AcquireSlot(%q): %v", session, err)
 		}
-		release(request.keep)
+		release()
 	}
 }
 
@@ -274,45 +271,40 @@ func TestAcquireSlotSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
 		name        string
 		existing    []string
 		failRestore []string
-		requests    []slotRequest
+		requests    []string
 		want        []string
 	}{
 		{
 			name:     "same session reuses the slot without save or restore",
-			requests: []slotRequest{{"a", true}, {"a", true}, {"a", true}},
+			requests: []string{"a", "a", "a"},
 			want:     nil,
 		},
 		{
 			name:     "switching session saves the previous one",
-			requests: []slotRequest{{"a", true}, {"b", true}},
+			requests: []string{"a", "b"},
 			want:     []string{"save a"},
 		},
 		{
 			name:     "switching back restores the saved session",
-			requests: []slotRequest{{"a", true}, {"b", true}, {"a", true}},
+			requests: []string{"a", "b", "a"},
 			want:     []string{"save a", "save b", "restore a"},
 		},
 		{
 			name:     "existing cache is restored on the first request",
 			existing: []string{"a"},
-			requests: []slotRequest{{"a", true}, {"a", true}},
+			requests: []string{"a", "a"},
 			want:     []string{"restore a"},
-		},
-		{
-			name:     "session not kept is not saved",
-			requests: []slotRequest{{"a", false}, {"b", true}},
-			want:     nil,
 		},
 		{
 			name:        "session is saved after a failed restore",
 			existing:    []string{"a"},
 			failRestore: []string{"a"},
-			requests:    []slotRequest{{"a", true}, {"b", true}},
+			requests:    []string{"a", "b"},
 			want:        []string{"restore a", "save a"},
 		},
 		{
 			name:     "session-less request evicts the session",
-			requests: []slotRequest{{"a", true}, {"", true}, {"a", true}},
+			requests: []string{"a", "", "a"},
 			want:     []string{"save a", "restore a"},
 		},
 	}
@@ -332,28 +324,28 @@ func TestAcquireSlotKeepsRecentlyUsedSlotFiles(t *testing.T) {
 	tests := []struct {
 		name      string
 		maxFiles  int
-		requests  []slotRequest
+		requests  []string
 		want      []string
 		wantFiles []string
 	}{
 		{
 			name:      "least recently used session removed over the limit",
 			maxFiles:  2,
-			requests:  []slotRequest{{"a", true}, {"b", true}, {"c", true}, {"d", true}},
+			requests:  []string{"a", "b", "c", "d"},
 			want:      []string{"save a", "save b", "save c"},
 			wantFiles: []string{"b", "c"},
 		},
 		{
 			name:      "requested session counts as used before the limit is applied",
 			maxFiles:  2,
-			requests:  []slotRequest{{"a", true}, {"b", true}, {"c", true}, {"a", true}},
+			requests:  []string{"a", "b", "c", "a"},
 			want:      []string{"save a", "save b", "save c", "restore a"},
 			wantFiles: []string{"a", "c"},
 		},
 		{
 			name:      "requested session is restored before the limit is applied",
 			maxFiles:  1,
-			requests:  []slotRequest{{"a", true}, {"b", true}, {"a", true}},
+			requests:  []string{"a", "b", "a"},
 			want:      []string{"save a", "save b", "restore a"},
 			wantFiles: []string{"b"},
 		},
@@ -404,23 +396,23 @@ func startHelperProcess(t *testing.T, srv *Server) {
 func TestStopSavesUnsavedSlot(t *testing.T) {
 	tests := []struct {
 		name     string
-		requests []slotRequest
+		requests []string
 		want     []string
 	}{
 		{
 			name:     "unsaved session is saved",
-			requests: []slotRequest{{"a", true}},
+			requests: []string{"a"},
 			want:     []string{"save a"},
 		},
 		{
-			name:     "session not kept is not saved",
-			requests: []slotRequest{{"a", false}},
+			name:     "session-less request leaves nothing to save",
+			requests: []string{""},
 			want:     nil,
 		},
 		{
 			name:     "session saved on switch is not saved again",
-			requests: []slotRequest{{"a", true}, {"b", false}},
-			want:     []string{"save a"},
+			requests: []string{"a", "b"},
+			want:     []string{"save a", "save b"},
 		},
 	}
 
@@ -440,27 +432,61 @@ func TestStopSavesUnsavedSlot(t *testing.T) {
 	}
 }
 
-func TestSlotFileNormalizesUnsafeCharacters(t *testing.T) {
+func TestSlotFileNamesModelAndSession(t *testing.T) {
 	tests := []struct {
-		name string
-		want string
+		selector string
+		session  string
+		want     string
 	}{
-		{"simple", "simple.bin"},
-		{"with slash", "with--slash.bin"},
-		{"with backslash", "with--backslash.bin"},
-		{"with spaces", "with--spaces.bin"},
-		{"with colon", "with--colon.bin"},
-		{"a.b.c", "a.b.c.bin"},
-		{"with unicode ñ", "with--unicode--.bin"},
+		{"qwen3.6-35b", "simple", "qwen3.6-35b--a7a39b72f29718e6.bin"},
+		{"qwen3.6-35b", "a/b", "qwen3.6-35b--c14cddc033f64b9d.bin"},
+		{"qwen3.6-35b", "a:b", "qwen3.6-35b--6783a31eabf68ccc.bin"},
+		{"org/model", "simple", "org--model--a7a39b72f29718e6.bin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.selector+" "+tt.session, func(t *testing.T) {
+			srv := &Server{selector: tt.selector}
+			if got := srv.slotFile(tt.session); got != tt.want {
+				t.Errorf("slotFile(%q) = %q, want %q", tt.session, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSlotFileSeparatesModelsAndSessions(t *testing.T) {
+	type slotOwner struct {
+		selector string
+		session  string
+	}
+	tests := []struct {
+		name  string
+		first slotOwner
+		other slotOwner
+	}{
+		{"different models", slotOwner{"qwen3.6-35b", "session"}, slotOwner{"lfm2.5-24b", "session"}},
+		{"same architecture models", slotOwner{"qwen3.6-35b", "session"}, slotOwner{"cyber-tiel", "session"}},
+		{"selector and session split differently", slotOwner{"org/model", "simple"}, slotOwner{"org", "model/simple"}},
+		{"sessions differing only in unsafe characters", slotOwner{"m", "a/b"}, slotOwner{"m", "a:b"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := &Server{}
-			if got := srv.slotFile(tt.name); got != tt.want {
-				t.Errorf("slotFile(%q) = %q, want %q", tt.name, got, tt.want)
+			first := (&Server{selector: tt.first.selector}).slotFile(tt.first.session)
+			other := (&Server{selector: tt.other.selector}).slotFile(tt.other.session)
+			if first == other {
+				t.Errorf("%+v and %+v share slot file %q", tt.first, tt.other, first)
 			}
 		})
+	}
+}
+
+func TestSlotFileStaysPathSafe(t *testing.T) {
+	for _, session := range []string{"a/b", "a\\b", "../escape", "with unicode ñ", ""} {
+		name := (&Server{selector: "org/model"}).slotFile(session)
+		if strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, slotFileExtension) {
+			t.Errorf("slotFile(%q) = %q is not a plain %s file name", session, name, slotFileExtension)
+		}
 	}
 }
 
@@ -473,123 +499,306 @@ func TestSanitizeFileNameStaysPathSafe(t *testing.T) {
 	}
 }
 
-func TestIdleTimeoutProcess(t *testing.T) {
-	if os.Getenv("AIM_TEST_IDLE_HELPER") != "1" {
-		return
-	}
-	d, _ := time.ParseDuration(os.Getenv("AIM_IDLE_SLEEP"))
-	time.Sleep(d)
-	os.Exit(0)
+func newIdleTestServer(t *testing.T, idleTimeout time.Duration) *Server {
+	t.Helper()
+	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{}, logger.New("ERROR"))
+	srv.idleTimeout = idleTimeout
+	startHelperProcess(t, srv)
+	t.Cleanup(func() { srv.cmd.Process.Kill() })
+	return srv
 }
 
-func startIdleTestProcess(t *testing.T, srv *Server, sleep time.Duration) {
+func expectRunningFor(t *testing.T, srv *Server, duration time.Duration, what string) {
 	t.Helper()
-	srv.cmd = exec.Command(os.Args[0], "-test.run=^TestIdleTimeoutProcess$")
-	srv.cmd.Env = append(os.Environ(), "AIM_TEST_IDLE_HELPER=1", "AIM_IDLE_SLEEP="+sleep.String())
-	if err := srv.cmd.Start(); err != nil {
-		t.Fatal(err)
+	select {
+	case <-time.After(duration):
+	case <-srv.done:
+		t.Fatalf("server stopped %s", what)
 	}
-	done := make(chan struct{})
-	srv.done = done
-	go func() {
-		srv.cmd.Wait()
-		close(done)
-	}()
 }
 
 func TestIdleTimeoutArmsAndFires(t *testing.T) {
-	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
-	startIdleTestProcess(t, srv, time.Second)
+	srv := newIdleTestServer(t, 200*time.Millisecond)
 
 	if !srv.startIdleTimer() {
 		t.Fatal("startIdleTimer reported no timer armed")
 	}
 
-	deadline := time.After(2 * time.Second)
-	for !srv.Exited() {
-		select {
-		case <-deadline:
-			t.Fatal("server did not stop after idle timeout")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitUntil(t, 2*time.Second, "idle stop", srv.Exited)
 }
 
 func TestIdleTimeoutDisabledWhenZero(t *testing.T) {
-	srv := &Server{idleTimeout: 0, logger: logger.New("ERROR")}
-	startIdleTestProcess(t, srv, time.Second)
+	srv := newIdleTestServer(t, 0)
 
 	if srv.startIdleTimer() {
 		t.Fatal("startIdleTimer armed with idle timeout 0")
 	}
-	select {
-	case <-time.After(300 * time.Millisecond):
-	case <-srv.done:
-		t.Fatal("server stopped with idle timeout disabled")
-	}
+	srv.EnterRequest()
+	srv.ExitRequest()
+	expectRunningFor(t, srv, 300*time.Millisecond, "with idle timeout disabled")
 }
 
 func TestEnterRequestCancelsIdleTimer(t *testing.T) {
-	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
-	startIdleTestProcess(t, srv, time.Second)
+	srv := newIdleTestServer(t, 200*time.Millisecond)
 	srv.startIdleTimer()
 
 	srv.EnterRequest()
-	select {
-	case <-time.After(400 * time.Millisecond):
-	case <-srv.done:
-		t.Fatal("server stopped while a request was in flight")
-	}
+	expectRunningFor(t, srv, 400*time.Millisecond, "while a request was in flight")
 
 	srv.ExitRequest()
-	deadline := time.After(2 * time.Second)
-	for !srv.Exited() {
-		select {
-		case <-deadline:
-			t.Fatal("server did not stop after request exit and idle timeout")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	waitUntil(t, 2*time.Second, "idle stop after the request exited", srv.Exited)
 }
 
 func TestExitRequestWaitsUntilAllRequestsDone(t *testing.T) {
-	srv := &Server{idleTimeout: 200 * time.Millisecond, logger: logger.New("ERROR")}
-	startIdleTestProcess(t, srv, time.Second)
+	srv := newIdleTestServer(t, 200*time.Millisecond)
 	srv.startIdleTimer()
 
 	srv.EnterRequest()
 	srv.EnterRequest()
 	srv.ExitRequest()
-	select {
-	case <-time.After(400 * time.Millisecond):
-	case <-srv.done:
-		t.Fatal("server stopped while a request was still in flight")
-	}
+	expectRunningFor(t, srv, 400*time.Millisecond, "while a request was still in flight")
 
 	srv.ExitRequest()
-	deadline := time.After(2 * time.Second)
-	for !srv.Exited() {
-		select {
-		case <-deadline:
-			t.Fatal("server did not stop after the last request exited")
-		case <-time.After(50 * time.Millisecond):
-		}
+	waitUntil(t, 2*time.Second, "idle stop after the last request exited", srv.Exited)
+}
+
+func TestStopIfIdle(t *testing.T) {
+	tests := []struct {
+		name     string
+		prepare  func(srv *Server) uint64
+		wantStop bool
+	}{
+		{
+			name: "current timer stops an idle server",
+			prepare: func(srv *Server) uint64 {
+				srv.startIdleTimer()
+				return srv.idleGeneration
+			},
+			wantStop: true,
+		},
+		{
+			name: "timer replaced by a later request is ignored",
+			prepare: func(srv *Server) uint64 {
+				srv.startIdleTimer()
+				stale := srv.idleGeneration
+				srv.EnterRequest()
+				srv.ExitRequest()
+				return stale
+			},
+			wantStop: false,
+		},
+		{
+			name: "timer disarmed by an in-flight request is ignored",
+			prepare: func(srv *Server) uint64 {
+				srv.startIdleTimer()
+				stale := srv.idleGeneration
+				srv.EnterRequest()
+				return stale
+			},
+			wantStop: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newIdleTestServer(t, time.Hour)
+			srv.stopIfIdle(tt.prepare(srv))
+			if got := srv.Exited(); got != tt.wantStop {
+				t.Errorf("stopped %v, want %v", got, tt.wantStop)
+			}
+		})
+	}
+}
+
+func TestStopDisarmsIdleTimerAndRejectsRequests(t *testing.T) {
+	srv := newIdleTestServer(t, time.Hour)
+	srv.startIdleTimer()
+
+	srv.Stop(context.Background())
+
+	if srv.idleTimer != nil {
+		t.Error("idle timer still armed after Stop")
+	}
+	if srv.EnterRequest() {
+		t.Error("EnterRequest accepted a request on a stopped server")
+	}
+}
+
+func TestEnterRequestRejectedOnceIdleStopBegins(t *testing.T) {
+	srv := newIdleTestServer(t, time.Hour)
+	srv.startIdleTimer()
+	generation := srv.idleGeneration
+
+	stopped := make(chan struct{})
+	go func() {
+		srv.stopIfIdle(generation)
+		close(stopped)
+	}()
+	waitUntil(t, 2*time.Second, "idle stop to begin", func() bool {
+		srv.idleMu.Lock()
+		defer srv.idleMu.Unlock()
+		return srv.stopping
+	})
+
+	if srv.EnterRequest() {
+		t.Error("EnterRequest accepted a request on a server stopping after idle")
+	}
+	receiveWithin(t, stopped, 5*time.Second, "idle stop")
+}
+
+func TestStartAbortsWhenContextCanceled(t *testing.T) {
+	tests := []struct {
+		name           string
+		mode           string
+		inferenceDelay time.Duration
+		cancelOnReady  bool
+	}{
+		{name: "server never becomes ready", mode: fakeLlamaServerModeHang},
+		{name: "server ready but waiting for the inference delay", mode: fakeLlamaServerModeServe, inferenceDelay: time.Minute, cancelOnReady: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(fakeLlamaServerEnv, tt.mode)
+			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{InferenceDelay: tt.inferenceDelay}, logger.New("ERROR"))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			started := make(chan error, 1)
+			go func() { started <- srv.Start(ctx) }()
+
+			if tt.cancelOnReady {
+				waitForInferenceDelay(t, srv.URL()+"/health")
+			}
+			cancel()
+
+			if err := receiveWithin(t, started, 5*time.Second, "canceled startup"); err == nil {
+				t.Fatal("Start succeeded although its context was canceled")
+			}
+			if !srv.Exited() {
+				t.Error("process still running after canceled startup")
+			}
+		})
 	}
 }
 
 func TestIdleTimeoutDuration(t *testing.T) {
+	seconds := func(value int) *int { return &value }
 	tests := []struct {
-		seconds int
+		name    string
+		seconds *int
 		want    time.Duration
 	}{
-		{0, defaultIdleTimeout},
-		{-5, defaultIdleTimeout},
-		{300, 300 * time.Second},
-		{1, time.Second},
+		{"unset uses default", nil, defaultIdleTimeout},
+		{"zero disables", seconds(0), 0},
+		{"configured", seconds(300), 300 * time.Second},
+		{"one second", seconds(1), time.Second},
 	}
 	for _, tt := range tests {
-		if got := idleTimeoutDuration(tt.seconds); got != tt.want {
-			t.Errorf("idleTimeoutDuration(%d) = %v, want %v", tt.seconds, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := idleTimeoutDuration(tt.seconds); got != tt.want {
+				t.Errorf("idleTimeoutDuration = %v, want %v", got, tt.want)
+			}
+		})
 	}
+}
+
+func TestNewServerIdleTimeoutZeroNeverStops(t *testing.T) {
+	disabled := 0
+	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{IdleTimeout: &disabled}, logger.New("ERROR"))
+	startHelperProcess(t, srv)
+	t.Cleanup(func() { srv.cmd.Process.Kill() })
+
+	if srv.startIdleTimer() {
+		t.Fatal("startIdleTimer armed with idle_timeout 0")
+	}
+	srv.EnterRequest()
+	srv.ExitRequest()
+	expectRunningFor(t, srv, 300*time.Millisecond, "with idle_timeout 0")
+}
+
+const (
+	fakeLlamaServerEnv            = "AIM_FAKE_LLAMA_SERVER"
+	fakeLlamaServerModeServe      = "serve"
+	fakeLlamaServerModeHang       = "hang"
+	fakeLlamaServerOrphanInterval = 100 * time.Millisecond
+)
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(fakeLlamaServerEnv) {
+	case fakeLlamaServerModeServe:
+		go exitWhenOrphaned(os.Getppid())
+		runFakeLlamaServer(os.Args[1:])
+	case fakeLlamaServerModeHang:
+		exitWhenOrphaned(os.Getppid())
+	default:
+		os.Exit(m.Run())
+	}
+}
+
+func exitWhenOrphaned(parent int) {
+	for os.Getppid() == parent {
+		time.Sleep(fakeLlamaServerOrphanInterval)
+	}
+	os.Exit(0)
+}
+
+func runFakeLlamaServer(args []string) {
+	slotDir := argValue(args, "--slot-save-path")
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		received, _ := io.ReadAll(r.Body)
+		var body struct {
+			FakeDelay  string `json:"fake_delay"`
+			FakeStatus int    `json:"fake_status"`
+			FakeEcho   bool   `json:"fake_echo"`
+		}
+		json.Unmarshal(received, &body)
+		delay, _ := time.ParseDuration(body.FakeDelay)
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(cmp.Or(body.FakeStatus, http.StatusOK))
+		if body.FakeEcho {
+			w.Write(received)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[]}`)
+	})
+	mux.HandleFunc("POST /slots/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Filename string `json:"filename"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if r.URL.Query().Get("action") == "save" {
+			os.WriteFile(filepath.Join(slotDir, body.Filename), []byte("kv"), 0o644)
+		}
+		fmt.Fprint(w, `{"n_saved": 1, "n_restored": 1}`)
+	})
+	http.ListenAndServe(net.JoinHostPort(argValue(args, "--host"), argValue(args, "--port")), mux)
+}
+
+func waitForInferenceDelay(t *testing.T, healthURL string) {
+	t.Helper()
+	waitUntil(t, handleTimeout, "server ready", func() bool {
+		return respondsOK(healthURL)
+	})
+	<-time.After(2 * healthPollInterval)
+}
+
+func respondsOK(url string) bool {
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func argValue(args []string, name string) string {
+	index := slices.Index(args, name)
+	if index < 0 || index+1 >= len(args) {
+		return ""
+	}
+	return args[index+1]
 }

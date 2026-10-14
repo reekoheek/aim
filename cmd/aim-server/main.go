@@ -15,8 +15,8 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
-	"github.com/reekoheek/aim/pkg/llamacpp"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
+	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
 )
 
 var (
@@ -105,7 +105,7 @@ func run(cmd *cobra.Command, args []string) error {
 			slog.Duration("expiration", serverCfg.SlotExpiration),
 			slog.Int("max_files", serverCfg.SlotMaxFiles),
 		)
-		go llamacpp.PruneSlots(slotPruneCtx, serverCfg, l)
+		go llamaserver.PruneSlots(slotPruneCtx, serverCfg, l)
 	}
 
 	sigCh := make(chan os.Signal, 1)
