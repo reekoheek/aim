@@ -21,31 +21,32 @@ import (
 )
 
 const (
-	defaultPort           = 8082
-	defaultHost           = "127.0.0.1"
-	startTimeout          = 30 * time.Second
-	healthPollInterval    = 500 * time.Millisecond
-	defaultStopTimeout    = 5 * time.Second
-	defaultInferenceDelay = 1 * time.Second
-	defaultIdleTimeout    = 5 * time.Minute
+	defaultPort        = 8082
+	defaultHost        = "127.0.0.1"
+	startTimeout       = 30 * time.Second
+	healthPollInterval = 500 * time.Millisecond
+	defaultStopTimeout = 5 * time.Second
+	defaultIdleTimeout = 5 * time.Minute
+	minParallelSlots   = 1
 )
 
 type Server struct {
-	bin            string
-	port           int
-	host           string
-	flags          map[string]any
-	stopTimeout    time.Duration
-	idleTimeout    time.Duration
-	selector       string
-	inferenceDelay time.Duration
-	onIdle         func(*Server)
-	cmd            *exec.Cmd
-	done           chan struct{}
-	logger         *logger.Logger
-	mu             sync.Mutex
-	started        bool
-	startErr       error
+	bin           string
+	port          int
+	host          string
+	flags         map[string]any
+	parallelSlots int
+	slotContext   int
+	stopTimeout   time.Duration
+	idleTimeout   time.Duration
+	selector      string
+	onIdle        func(*Server)
+	cmd           *exec.Cmd
+	done          chan struct{}
+	logger        *logger.Logger
+	mu            sync.Mutex
+	started       bool
+	startErr      error
 
 	idleMu         sync.Mutex
 	idleTimer      *time.Timer
@@ -56,16 +57,17 @@ type Server struct {
 
 func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger, onIdle func(*Server)) *Server {
 	return &Server{
-		bin:            entry.Bin,
-		port:           entry.Port,
-		host:           defaultHost,
-		flags:          entry.Flags,
-		stopTimeout:    cmp.Or(entry.StopTimeout, defaultStopTimeout),
-		inferenceDelay: cmp.Or(server.InferenceDelay, defaultInferenceDelay),
-		idleTimeout:    idleTimeoutDuration(server.IdleTimeout),
-		selector:       selector,
-		onIdle:         onIdle,
-		logger:         l,
+		bin:           entry.Bin,
+		port:          entry.Port,
+		host:          defaultHost,
+		flags:         entry.Flags,
+		parallelSlots: max(entry.Slots, minParallelSlots),
+		slotContext:   entry.Ctx,
+		stopTimeout:   cmp.Or(entry.StopTimeout, defaultStopTimeout),
+		idleTimeout:   idleTimeoutDuration(server.IdleTimeout),
+		selector:      selector,
+		onIdle:        onIdle,
+		logger:        l,
 	}
 }
 
@@ -140,10 +142,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.logger.Info("llama.cpp server ready", slog.String("addr", addr))
 
-	if err := s.waitInferenceDelay(ctx, done); err != nil {
-		return s.abortStart(err, done)
-	}
-
 	s.started = true
 
 	if s.startIdleTimer() {
@@ -159,21 +157,6 @@ func (s *Server) abortStart(err error, done <-chan struct{}) error {
 	<-done
 	s.logger.LogError("llama.cpp server failed to start", err)
 	return err
-}
-
-func (s *Server) waitInferenceDelay(ctx context.Context, done <-chan struct{}) error {
-	if s.inferenceDelay <= 0 {
-		return nil
-	}
-	s.logger.Info("waiting for inference delay", slog.Duration("delay", s.inferenceDelay))
-	select {
-	case <-time.After(s.inferenceDelay):
-		return nil
-	case <-done:
-		return fmt.Errorf("server exited during startup")
-	case <-ctx.Done():
-		return fmt.Errorf("server startup canceled: %w", ctx.Err())
-	}
 }
 
 func (s *Server) waitReady(ctx context.Context, done <-chan struct{}) error {
@@ -340,16 +323,26 @@ func (s *Server) GetFlags() map[string]any {
 }
 
 func (s *Server) args() []string {
-	return append(append([]string{
+	args := append([]string{
 		"--offline",
 		"--no-cors-credentials",
 		"--cors-origins", "localhost",
 		"--no-ui",
-	}, flagArgs(s.flags)...),
+	}, flagArgs(s.flags)...)
+	args = append(args, s.slotArgs()...)
+	return append(args,
 		"--host", s.host,
 		"--port", strconv.Itoa(s.port),
 		"--log-colors", "off",
 	)
+}
+
+func (s *Server) slotArgs() []string {
+	args := []string{"-np", strconv.Itoa(s.parallelSlots)}
+	if s.slotContext > 0 {
+		args = append(args, "-c", strconv.Itoa(s.slotContext*s.parallelSlots))
+	}
+	return args
 }
 
 func flagArgs(flags map[string]any) []string {

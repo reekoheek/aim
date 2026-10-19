@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,13 +101,14 @@ func TestServerArgs(t *testing.T) {
 	}{
 		{
 			name:  "managed flags only",
-			entry: &config.LlamaCppEntry{Port: 12345},
-			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
+			entry: &config.LlamaCppEntry{Port: 12345, Slots: 1},
+			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "-np", "1", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
 		},
 		{
 			name: "managed flags come after model flags",
 			entry: &config.LlamaCppEntry{
 				Port:  23456,
+				Slots: 1,
 				Flags: map[string]any{"-ngl": 999},
 			},
 			want: []string{
@@ -115,10 +117,31 @@ func TestServerArgs(t *testing.T) {
 				"--cors-origins", "localhost",
 				"--no-ui",
 				"-ngl", "999",
+				"-np", "1",
 				"--host", "127.0.0.1",
 				"--port", "23456",
 				"--log-colors", "off",
 			},
+		},
+		{
+			name:  "slot count sets parallel slots",
+			entry: &config.LlamaCppEntry{Port: 12345, Slots: 3},
+			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "-np", "3", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
+		},
+		{
+			name:  "slot cache turned off keeps one parallel slot",
+			entry: &config.LlamaCppEntry{Port: 12345, Slots: 0},
+			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "-np", "1", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
+		},
+		{
+			name:  "context per slot sizes the whole context",
+			entry: &config.LlamaCppEntry{Port: 12345, Slots: 2, Ctx: 64000},
+			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "-np", "2", "-c", "128000", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
+		},
+		{
+			name:  "context with slot cache turned off covers the one slot",
+			entry: &config.LlamaCppEntry{Port: 12345, Slots: 0, Ctx: 4096},
+			want:  []string{"--offline", "--no-cors-credentials", "--cors-origins", "localhost", "--no-ui", "-np", "1", "-c", "4096", "--host", "127.0.0.1", "--port", "12345", "--log-colors", "off"},
 		},
 	}
 
@@ -127,6 +150,25 @@ func TestServerArgs(t *testing.T) {
 			got := NewServer("m", tt.entry, config.ServerConfig{}, nil, nil).args()
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerArgsCannotBeConfiguredAsFlags(t *testing.T) {
+	entry := withSlotSavePath(&config.LlamaCppEntry{Port: 12345, Slots: 1, Ctx: 4096}, "/slots")
+	for _, arg := range NewServer("m", entry, config.ServerConfig{}, nil, nil).args() {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		t.Run(arg, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".aim.yaml")
+			yaml := fmt.Sprintf("models:\n  m:\n    type: llama-server\n    flags:\n      %s: true\n", arg)
+			if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := config.Load(path); err == nil {
+				t.Errorf("config accepts %s although aim sets it", arg)
 			}
 		})
 	}
@@ -145,26 +187,6 @@ func TestNewServerStopTimeout(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil, nil).stopTimeout
-			if got != tt.want {
-				t.Errorf("got %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNewServerInferenceDelay(t *testing.T) {
-	tests := []struct {
-		name  string
-		delay time.Duration
-		want  time.Duration
-	}{
-		{name: "default", delay: 0, want: defaultInferenceDelay},
-		{name: "configured", delay: 5 * time.Second, want: 5 * time.Second},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", &config.LlamaCppEntry{}, config.ServerConfig{InferenceDelay: tt.delay}, nil, nil).inferenceDelay
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
@@ -367,28 +389,22 @@ func TestEnterRequestRejectedOnceIdleStopBegins(t *testing.T) {
 
 func TestStartAbortsWhenContextCanceled(t *testing.T) {
 	tests := []struct {
-		name           string
-		mode           string
-		inferenceDelay time.Duration
-		cancelOnReady  bool
+		name string
+		mode string
 	}{
 		{name: "server never becomes ready", mode: fakeLlamaServerModeHang},
-		{name: "server ready but waiting for the inference delay", mode: fakeLlamaServerModeServe, inferenceDelay: time.Minute, cancelOnReady: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(fakeLlamaServerEnv, tt.mode)
-			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{InferenceDelay: tt.inferenceDelay}, logger.New("ERROR"), nil)
+			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{}, logger.New("ERROR"), nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			started := make(chan error, 1)
 			go func() { started <- srv.Start(ctx) }()
 
-			if tt.cancelOnReady {
-				waitForInferenceDelay(t, srv.URL()+"/health")
-			}
 			cancel()
 
 			if err := receiveWithin(t, started, 5*time.Second, "canceled startup"); err == nil {
@@ -495,23 +511,6 @@ func runFakeLlamaServer(args []string) {
 		fmt.Fprint(w, `{"n_saved": 1, "n_restored": 1}`)
 	})
 	http.ListenAndServe(net.JoinHostPort(argValue(args, "--host"), argValue(args, "--port")), mux)
-}
-
-func waitForInferenceDelay(t *testing.T, healthURL string) {
-	t.Helper()
-	waitUntil(t, handleTimeout, "server ready", func() bool {
-		return respondsOK(healthURL)
-	})
-	<-time.After(2 * healthPollInterval)
-}
-
-func respondsOK(url string) bool {
-	resp, err := client.Get(url)
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 func argValue(args []string, name string) string {
