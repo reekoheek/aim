@@ -50,7 +50,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 
 	if slots != nil {
 		session := req.SessionID()
-		release, err := slots.acquire(ctx, session)
+		slotID, release, err := slots.acquire(ctx, session)
 		if err != nil {
 			s.logger.LogError("failed to acquire slot", err, slog.String("session", session))
 			strategy.WriteError(w, http.StatusServiceUnavailable, strategy.ErrorTypeServer, err.Error())
@@ -58,7 +58,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		}
 		defer release()
 
-		slots.pin(fields)
+		pinSlot(fields, slotID)
 		body, _ := json.Marshal(fields)
 		req.Body = body
 	}

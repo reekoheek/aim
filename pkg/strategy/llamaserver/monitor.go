@@ -75,7 +75,7 @@ func (m *Monitor) Acquire(ctx context.Context, cfg *config.Config, l *logger.Log
 
 func (m *Monitor) startServer(model string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) error {
 	var slotDir string
-	if server.SaveSlotPath != "" {
+	if server.SaveSlotPath != "" && entry.Slots > 0 {
 		dir, err := prepareSlotDir(server.SaveSlotPath)
 		if err != nil {
 			l.LogError("invalid slot save path", err)
@@ -92,7 +92,7 @@ func (m *Monitor) startServer(model string, entry *config.LlamaCppEntry, server 
 
 	m.server = srv
 	if slotDir != "" {
-		m.slots = newSlotCache(slotDir, model, srv.URL(), server, l, srv.processDone())
+		m.slots = newSlotCache(slotDir, model, srv.URL(), entry.Slots, server, l, srv.processDone())
 	}
 	return nil
 }

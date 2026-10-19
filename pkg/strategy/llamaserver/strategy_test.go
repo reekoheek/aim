@@ -17,11 +17,11 @@ import (
 
 const handleTimeout = 15 * time.Second
 
-func handleAsync(m *Monitor, cfg *config.Config, model string, delay time.Duration) <-chan int {
+func handleAsync(m *Monitor, cfg *config.Config, model string, session string, delay time.Duration) <-chan int {
 	s := NewStrategy(cfg, testLogger, m, model)
 	req := &strategy.Request{
 		Body:    []byte(fmt.Sprintf(`{"model":%q,"fake_delay":%q}`, model, delay)),
-		Headers: http.Header{"X-Session-Affinity": {"session"}},
+		Headers: http.Header{"X-Session-Affinity": {session}},
 	}
 	statuses := make(chan int, 1)
 	go func() {
@@ -36,7 +36,7 @@ func TestHandleSurvivesIdleTimeoutDuringRequest(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 1, "a")
 	m := newTestMonitor(t)
 
-	status := receiveWithin(t, handleAsync(m, cfg, "a", 1500*time.Millisecond), handleTimeout, "request outlasting the idle timeout")
+	status := receiveWithin(t, handleAsync(m, cfg, "a", "session", 1500*time.Millisecond), handleTimeout, "request outlasting the idle timeout")
 	if status != http.StatusOK {
 		t.Fatalf("status %d, want %d", status, http.StatusOK)
 	}
@@ -49,12 +49,12 @@ func TestHandleSwitchesModelWhileRequestInFlight(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a", "b")
 	m := newTestMonitor(t)
 
-	first := handleAsync(m, cfg, "a", 800*time.Millisecond)
+	first := handleAsync(m, cfg, "a", "session", 800*time.Millisecond)
 	waitUntil(t, handleTimeout, "first request holding the slot", func() bool {
 		slots := currentSlots(m)
-		return slots != nil && len(slots.slot) == 1
+		return slots != nil && busySlots(slots) == 1
 	})
-	second := handleAsync(m, cfg, "b", 0)
+	second := handleAsync(m, cfg, "b", "session", 0)
 
 	for _, tt := range []struct {
 		name     string
@@ -69,6 +69,44 @@ func TestHandleSwitchesModelWhileRequestInFlight(t *testing.T) {
 	}
 	if got := currentServer(m).Selector(); got != "b" {
 		t.Errorf("current model %q, want %q", got, "b")
+	}
+}
+
+func TestHandleServesSessionsInParallelUpToSlotCount(t *testing.T) {
+	const slowRequest = 1500 * time.Millisecond
+	tests := []struct {
+		name         string
+		slots        int
+		wantParallel bool
+	}{
+		{name: "one slot queues the second session", slots: 1, wantParallel: false},
+		{name: "two slots serve both sessions at once", slots: 2, wantParallel: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			cfg.Models["a"].LlamaCpp.Slots = tt.slots
+			m := newTestMonitor(t)
+
+			slow := handleAsync(m, cfg, "a", "slow", slowRequest)
+			waitUntil(t, handleTimeout, "slow request holding a slot", func() bool {
+				slots := currentSlots(m)
+				return slots != nil && busySlots(slots) == 1
+			})
+			start := time.Now()
+			fast := handleAsync(m, cfg, "a", "fast", 0)
+
+			if status := receiveWithin(t, fast, handleTimeout, "fast request"); status != http.StatusOK {
+				t.Errorf("fast request status %d, want %d", status, http.StatusOK)
+			}
+			if parallel := time.Since(start) < slowRequest/2; parallel != tt.wantParallel {
+				t.Errorf("fast request served alongside the slow one %v, want %v", parallel, tt.wantParallel)
+			}
+			if status := receiveWithin(t, slow, handleTimeout, "slow request"); status != http.StatusOK {
+				t.Errorf("slow request status %d, want %d", status, http.StatusOK)
+			}
+		})
 	}
 }
 
@@ -97,9 +135,9 @@ func TestHandleKeepsSlotForSessionWhateverTheUpstreamStatus(t *testing.T) {
 			if recorder.Code != tt.status {
 				t.Fatalf("status %d, want %d", recorder.Code, tt.status)
 			}
-			slots := currentSlots(m)
-			if slots.session != "session" || !slots.unsaved {
-				t.Errorf("slot session %q unsaved %v, want %q unsaved true", slots.session, slots.unsaved, "session")
+			slot := currentSlots(m).slots[0]
+			if slot.session != "session" || !slot.unsaved {
+				t.Errorf("slot session %q unsaved %v, want %q unsaved true", slot.session, slot.unsaved, "session")
 			}
 		})
 	}
@@ -261,7 +299,7 @@ func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
 			}
-			if got := currentSlots(m).session; got != tt.want {
+			if got := currentSlots(m).slots[0].session; got != tt.want {
 				t.Errorf("slot session %q, want %q", got, tt.want)
 			}
 		})

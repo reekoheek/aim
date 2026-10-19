@@ -3,10 +3,10 @@ package llamaserver
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -34,9 +34,8 @@ func newFakeLlamaConfig(t *testing.T, idleTimeoutSeconds int, models ...string) 
 	cfg := &config.Config{
 		Models: map[string]config.ModelEntry{},
 		Server: config.ServerConfig{
-			SaveSlotPath:   t.TempDir(),
-			InferenceDelay: time.Millisecond,
-			IdleTimeout:    &idleTimeoutSeconds,
+			SaveSlotPath: t.TempDir(),
+			IdleTimeout:  &idleTimeoutSeconds,
 		},
 	}
 	for _, model := range models {
@@ -46,6 +45,7 @@ func newFakeLlamaConfig(t *testing.T, idleTimeoutSeconds int, models ...string) 
 				Bin:         os.Args[0],
 				Port:        freePort(t),
 				StopTimeout: 2 * time.Second,
+				Slots:       1,
 			},
 		}
 	}
@@ -195,7 +195,7 @@ func TestMonitorIdleStopSavesSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := slots.acquire(context.Background(), "session")
+	_, release, err := slots.acquire(context.Background(), "session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestMonitorSwitchWaitsForInFlightRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := slots.acquire(context.Background(), "session")
+	_, release, err := slots.acquire(context.Background(), "session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestMonitorCloseInterruptsSwitchWaitingForRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	release, err := slots.acquire(context.Background(), "session")
+	_, release, err := slots.acquire(context.Background(), "session")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestMonitorAcquireGivesUpWaitingForSwitchWhenRequestCanceled(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			release, err := slots.acquire(context.Background(), "session")
+			_, release, err := slots.acquire(context.Background(), "session")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -375,14 +375,13 @@ func TestMonitorCloseStopsServerOnceSwitchOutlastsDeadline(t *testing.T) {
 	}
 }
 
-func TestMonitorCloseInterruptsStartDuringInferenceDelay(t *testing.T) {
+func TestMonitorCloseInterruptsStartBeforeServerIsReady(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
-	cfg.Server.InferenceDelay = time.Minute
+	t.Setenv(fakeLlamaServerEnv, fakeLlamaServerModeHang)
 	m := newTestMonitor(t)
-	healthURL := fmt.Sprintf("http://%s:%d/health", defaultHost, cfg.Models["a"].LlamaCpp.Port)
 
 	started := acquireAsync(m, cfg, "a")
-	waitForInferenceDelay(t, healthURL)
+	waitForMonitorLockHeld(t, m)
 
 	closed := make(chan struct{})
 	go func() {
@@ -390,12 +389,12 @@ func TestMonitorCloseInterruptsStartDuringInferenceDelay(t *testing.T) {
 		close(closed)
 	}()
 
-	receiveWithin(t, closed, fakeMonitorCloseTimeout, "close during the inference delay")
+	receiveWithin(t, closed, fakeMonitorCloseTimeout, "close during startup")
 	if err := receiveWithin(t, started, handleTimeout, "interrupted start"); !errors.Is(err, errStartFailed) {
 		t.Errorf("start error %v, want %v", err, errStartFailed)
 	}
-	if respondsOK(healthURL) {
-		t.Error("server still running after close")
+	if currentServer(m) != nil {
+		t.Error("monitor kept the server whose start was interrupted")
 	}
 }
 
@@ -416,7 +415,7 @@ func TestMonitorAcquireLeavesServerForCloseOnceShutdownBegins(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			release, err := slots.acquire(context.Background(), "session")
+			_, release, err := slots.acquire(context.Background(), "session")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -440,6 +439,54 @@ func TestMonitorAcquireLeavesServerForCloseOnceShutdownBegins(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(slots.dir, slots.file("session"))); err != nil {
 				t.Errorf("slot not saved on close: %v", err)
+			}
+		})
+	}
+}
+
+func TestMonitorStartServerSetsUpSlotsFromSlotCount(t *testing.T) {
+	tests := []struct {
+		name           string
+		slots          int
+		saveSlotPath   bool
+		wantParallel   string
+		wantSavePath   bool
+		wantCacheSlots int
+	}{
+		{name: "one slot", slots: 1, saveSlotPath: true, wantParallel: "1", wantSavePath: true, wantCacheSlots: 1},
+		{name: "several slots", slots: 3, saveSlotPath: true, wantParallel: "3", wantSavePath: true, wantCacheSlots: 3},
+		{name: "zero slots turn the slot cache off", slots: 0, saveSlotPath: true, wantParallel: "1", wantSavePath: false, wantCacheSlots: 0},
+		{name: "slots without a slot save path stay parallel", slots: 2, saveSlotPath: false, wantParallel: "2", wantSavePath: false, wantCacheSlots: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			entry := cfg.Models["a"].LlamaCpp
+			entry.Slots = tt.slots
+			server := cfg.DefaultServer()
+			if !tt.saveSlotPath {
+				server.SaveSlotPath = ""
+			}
+			m := newTestMonitor(t)
+
+			if err := m.startServer("a", entry, server, testLogger); err != nil {
+				t.Fatal(err)
+			}
+
+			args := currentServer(m).args()
+			if got := argValue(args, "-np"); got != tt.wantParallel {
+				t.Errorf("-np %q, want %q", got, tt.wantParallel)
+			}
+			if got := slices.Contains(args, slotSavePathFlag); got != tt.wantSavePath {
+				t.Errorf("passes %s %v, want %v", slotSavePathFlag, got, tt.wantSavePath)
+			}
+			cacheSlots := 0
+			if slots := currentSlots(m); slots != nil {
+				cacheSlots = len(slots.slots)
+			}
+			if cacheSlots != tt.wantCacheSlots {
+				t.Errorf("slot cache with %d slots, want %d", cacheSlots, tt.wantCacheSlots)
 			}
 		})
 	}
