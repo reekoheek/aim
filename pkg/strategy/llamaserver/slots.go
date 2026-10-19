@@ -141,7 +141,7 @@ func (c *slotCache) acquire(ctx context.Context, sessionID string) (slotID int, 
 	c.logger.Info("slot acquired",
 		slog.Int("slot", slot.id),
 		slog.String("session", sessionID),
-		slog.Duration("waited", acquired.Sub(start)),
+		logger.Seconds("waited", acquired.Sub(start)),
 	)
 
 	if assignment.previousSession != sessionID {
@@ -153,7 +153,7 @@ func (c *slotCache) acquire(ctx context.Context, sessionID string) (slotID int, 
 		c.logger.Info("slot released",
 			slog.Int("slot", slot.id),
 			slog.String("session", sessionID),
-			slog.Duration("held", time.Since(acquired)),
+			logger.Seconds("held", time.Since(acquired)),
 		)
 	}, nil
 }
@@ -403,7 +403,7 @@ func (c *slotCache) action(slotID int, action string, file string) error {
 		slog.Int("slot", slotID),
 		slog.String("file", file),
 		slog.Int("tokens", res.NSaved+res.NRestored),
-		slog.Duration("took", time.Since(start)),
+		logger.Seconds("took", time.Since(start)),
 	)
 	return nil
 }

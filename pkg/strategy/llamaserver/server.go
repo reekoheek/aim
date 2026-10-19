@@ -145,7 +145,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.started = true
 
 	if s.startIdleTimer() {
-		s.logger.Info("llama.cpp server idle timeout", slog.Duration("timeout", s.idleTimeout))
+		s.logger.Info("llama.cpp server idle timeout", logger.Seconds("timeout", s.idleTimeout))
 	}
 
 	return nil
@@ -277,7 +277,7 @@ func (s *Server) stopIfIdle(generation uint64) {
 	s.idleTimer = nil
 	s.idleMu.Unlock()
 
-	s.logger.Info("stopping llama.cpp server after idle", slog.Duration("timeout", s.idleTimeout))
+	s.logger.Info("stopping llama.cpp server after idle", logger.Seconds("timeout", s.idleTimeout))
 	s.onIdle(s)
 }
 

@@ -102,7 +102,7 @@ func run(cmd *cobra.Command, args []string) error {
 	if serverCfg.SaveSlotPath != "" {
 		l.Info("slot cache limits",
 			slog.String("dir", serverCfg.SaveSlotPath),
-			slog.Duration("expiration", serverCfg.SlotExpiration),
+			logger.Seconds("expiration", serverCfg.SlotExpiration),
 			slog.Int("max_files", serverCfg.SlotMaxFiles),
 		)
 		go llamaserver.PruneSlots(slotPruneCtx, serverCfg, l)
