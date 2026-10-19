@@ -42,7 +42,7 @@ server:
   idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m, 0 = never)
 ```
 
-Each session's llama-server KV cache is saved as a `.bin` file under `save_slot_path` when another session takes over the slot (or llama-server stops), and restored when that session comes back. A file counts as used when it is saved or when its session is requested again:
+Each llama-server model runs with `slots` KV cache slots (see below). A session (the `X-Session-Affinity` header; requests without it share one session) keeps its slot while it is in use. A session that has no slot takes an empty one, or else the least recently used free slot: that slot's session is saved as a `.bin` file under `save_slot_path`, and the incoming session is restored from its file. Every unsaved slot is also saved when llama-server stops. Requests wait while every slot is busy; a request whose session already holds a busy slot waits for that slot and is served before other waiting requests. A file counts as used when it is saved or when its session is requested again:
 
 - files unused for longer than `slot_expiration` (a Go duration such as `1h`, `90m`) are deleted
 - only the `slot_max_files` most recently used files are kept; older ones are deleted right after a session switch
@@ -55,30 +55,38 @@ A `llama-server` model is started on demand (one at a time). In its `flags`, eve
 
 - `-hf: org/repo` → `-hf org/repo`, `--temp: 0.6` → `--temp 0.6`
 - `true` adds a switch on its own (`--jinja: true` → `--jinja`), `false` leaves it out; `-fa: on` stays `-fa on`
-- flags are passed sorted by name; when a flag appears twice (e.g. `-c` and `--ctx-size`), llama-server uses the last one
+- flags are passed sorted by name; when a flag appears twice (e.g. `-b` and `--batch-size`), llama-server uses the last one
 
 Keys without a dash are aim settings:
 
 - `inherit: <template>` starts from a template under `templates`; the model's flags and settings win
 - `port`, `url` — where aim runs and reaches llama-server
-- `stop-timeout` — seconds aim waits for llama-server to stop before killing it (default 30)
 
-`--host`, `--port`, `--log-colors` and `--slot-save-path` are always set by aim.
+Next to `flags`, a model also takes `bin` (default: `llama-server` from `PATH`) and `stop_timeout` (seconds aim waits for llama-server to stop before killing it, default 30).
+
+`slots` and `ctx`, also next to `flags`, size the model's slots:
+
+- `slots: N` passes `-np N` and keeps a slot cache of N slots (default 1)
+- `slots: 0` passes `-np 1` and turns the slot cache off: no `--slot-save-path`, nothing saved or restored
+- `ctx: T` is the context of each slot: aim passes `-c T×N`, so every session gets `T` tokens however many slots there are; KV memory grows with `T×N`
+- without `ctx` aim passes no `-c`: llama-server gives every slot the model's training context, shrinking it (to no less than 4096 per slot) when it does not fit while keeping 1 GiB of device memory free; with `-fit: off` in `flags` it splits the training context between the slots instead
+
+aim sets `-np`, `-c`, `--host`, `--port`, `--log-colors`, `--slot-save-path`, `--offline`, `--no-ui`, `--cors-origins` and `--no-cors-credentials` itself. Writing any of them in `flags`, or an alias such as `--parallel`, `--ctx-size`, `--ui`, `--webui`, `--no-webui` or `--cors-credentials`, stops aim at startup with an error. So do `--kv-unified-per-slot` (use `ctx`) and `-kvu`/`--kv-unified`/`-no-kvu`/`--no-kv-unified`: with a unified KV pool llama-server purges idle slots to make room, which throws away the sessions aim keeps in them.
 
 ```yaml
 templates:
   default:
     -ngl: 999
     -fa: on
-    -c: 128000
     --jinja: true
-    --offline: true
 
 models:
   qwen3.6-35b:
     type: llama-server
     bin: /path/to/llama-server   # optional, default: llama-server from PATH
     stop_timeout: 10             # optional, seconds before kill (default 30)
+    slots: 2                     # optional, parallel slots (default 1, 0 = no slot cache)
+    ctx: 128000                  # optional, context per slot; aim passes -c 256000
     flags:
       inherit: default
       --spec-type: draft-mtp
