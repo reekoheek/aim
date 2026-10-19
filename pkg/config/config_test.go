@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,15 +34,15 @@ func TestLlamaCppFlagsOverlay(t *testing.T) {
 		},
 		{
 			name: "top wins and adds",
-			base: LlamaCppFlags{Port: 1, Args: map[string]any{"--temp": 0.6, "-c": 128000}},
+			base: LlamaCppFlags{Port: 1, Args: map[string]any{"--temp": 0.6, "-b": 2048}},
 			top:  LlamaCppFlags{Port: 2, Inherit: "default", Args: map[string]any{"--temp": 0.4, "-hf": "org/repo"}},
-			want: LlamaCppFlags{Port: 2, Inherit: "default", Args: map[string]any{"--temp": 0.4, "-c": 128000, "-hf": "org/repo"}},
+			want: LlamaCppFlags{Port: 2, Inherit: "default", Args: map[string]any{"--temp": 0.4, "-b": 2048, "-hf": "org/repo"}},
 		},
 		{
 			name: "false in top overrides true in base",
-			base: LlamaCppFlags{Args: map[string]any{"--offline": true}},
-			top:  LlamaCppFlags{Args: map[string]any{"--offline": false}},
-			want: LlamaCppFlags{Args: map[string]any{"--offline": false}},
+			base: LlamaCppFlags{Args: map[string]any{"--mlock": true}},
+			top:  LlamaCppFlags{Args: map[string]any{"--mlock": false}},
+			want: LlamaCppFlags{Args: map[string]any{"--mlock": false}},
 		},
 	}
 
@@ -83,10 +84,33 @@ server:
 `,
 		},
 		{
+			name: "slots and ctx ignored on chat-completion model",
+			yaml: `
+models:
+  remote/m:
+    type: chat-completion
+    provider: p
+    model: m
+    slots: -1
+    ctx: -1
+providers:
+  p:
+    base_url: http://p:8080
+`,
+		},
+		{
 			name: "slot_expiration not a duration",
 			yaml: `
 server:
   slot_expiration: 1d
+`,
+			wantErr: true,
+		},
+		{
+			name: "removed inference_delay setting",
+			yaml: `
+server:
+  inference_delay: 1s
 `,
 			wantErr: true,
 		},
@@ -134,7 +158,7 @@ templates:
     -ngl: 999
     -fa: on
     --jinja: true
-    --offline: true
+    --mlock: true
     --temp: 0.6
 models:
   m:
@@ -142,7 +166,7 @@ models:
     flags:
       inherit: default
       -hf: org/repo:Q4_K_M
-      --offline: false
+      --mlock: false
       --temp: 0.4
       --top-k: -1
 `,
@@ -151,14 +175,15 @@ models:
 				Bin:         "llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
+				Slots:       1,
 				Flags: map[string]any{
-					"-ngl":      999,
-					"-fa":       "on",
-					"--jinja":   true,
-					"--offline": false,
-					"--temp":    0.4,
-					"-hf":       "org/repo:Q4_K_M",
-					"--top-k":   -1,
+					"-ngl":    999,
+					"-fa":     "on",
+					"--jinja": true,
+					"--mlock": false,
+					"--temp":  0.4,
+					"-hf":     "org/repo:Q4_K_M",
+					"--top-k": -1,
 				},
 			},
 		},
@@ -184,6 +209,7 @@ models:
 				Bin:         "llama-server",
 				Port:        portFromSelector("b"),
 				StopTimeout: 30 * time.Second,
+				Slots:       1,
 				Flags:       map[string]any{"--temp": 0.6},
 			},
 		},
@@ -201,7 +227,7 @@ models:
       inherit: default
       port: 12345
       url: http://127.0.0.1:12345
-      -c: 4096
+      -b: 512
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
@@ -209,7 +235,8 @@ models:
 				URL:         "http://127.0.0.1:12345",
 				Port:        12345,
 				StopTimeout: 30 * time.Second,
-				Flags:       map[string]any{"--temp": 0.6, "-c": 4096},
+				Slots:       1,
+				Flags:       map[string]any{"--temp": 0.6, "-b": 512},
 			},
 		},
 		{
@@ -228,6 +255,7 @@ models:
 				URL:         "http://model-level:1",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
+				Slots:       1,
 			},
 		},
 		{
@@ -243,6 +271,60 @@ models:
 				Bin:         "/opt/llama/llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
+				Slots:       1,
+			},
+		},
+		{
+			name: "slots read by aim, not passed as flags",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    slots: 3
+    flags:
+      -b: 512
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
+				Bin:         "llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
+				Slots:       3,
+				Flags:       map[string]any{"-b": 512},
+			},
+		},
+		{
+			name: "ctx read by aim as context per slot",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    slots: 2
+    ctx: 64000
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
+				Bin:         "llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
+				Slots:       2,
+				Ctx:         64000,
+			},
+		},
+		{
+			name: "zero slots kept to turn the slot cache off",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    slots: 0
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
+				Bin:         "llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
+				Slots:       0,
 			},
 		},
 		{
@@ -306,6 +388,188 @@ models:
 				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsInvalidLlamaServerSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "negative slots",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    slots: -1
+`,
+			wantErr: `model "m": slots must be >= 0`,
+		},
+		{
+			name: "slots not a number",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    slots: many
+`,
+			wantErr: "cannot unmarshal",
+		},
+		{
+			name: "zero ctx",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    ctx: 0
+`,
+			wantErr: `model "m": ctx must be > 0`,
+		},
+		{
+			name: "negative ctx",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    ctx: -4096
+`,
+			wantErr: `model "m": ctx must be > 0`,
+		},
+		{
+			name: "context size flag in inherited template",
+			yaml: `
+templates:
+  default:
+    -c: 128000
+models:
+  m:
+    type: llama-server
+    flags:
+      inherit: default
+`,
+			wantErr: `model "m": flag -c is set by aim from ctx`,
+		},
+		{
+			name: "per-slot context flag",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      --kv-unified-per-slot: 64000
+`,
+			wantErr: `model "m": flag --kv-unified-per-slot is replaced by ctx`,
+		},
+		{
+			name: "unified KV flag",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      --kv-unified: true
+`,
+			wantErr: `model "m": flag --kv-unified is not supported`,
+		},
+		{
+			name: "short slot count flag",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      -np: 2
+`,
+			wantErr: `model "m": flag -np is set by aim from slots`,
+		},
+		{
+			name: "long slot count flag",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      --parallel: 2
+`,
+			wantErr: `model "m": flag --parallel is set by aim from slots`,
+		},
+		{
+			name: "slot count flag in inherited template",
+			yaml: `
+templates:
+  default:
+    -np: 1
+models:
+  m:
+    type: llama-server
+    flags:
+      inherit: default
+`,
+			wantErr: `model "m": flag -np is set by aim from slots`,
+		},
+		{
+			name: "aim flag set to false",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      --offline: false
+`,
+			wantErr: `model "m": flag --offline is set by aim`,
+		},
+		{
+			name: "aim flag in inherited template",
+			yaml: `
+templates:
+  default:
+    --port: 9000
+models:
+  m:
+    type: llama-server
+    flags:
+      inherit: default
+`,
+			wantErr: `model "m": flag --port is set by aim`,
+		},
+		{
+			name: "first flag set by aim reported by name",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    flags:
+      --webui: true
+      --host: 0.0.0.0
+`,
+			wantErr: `model "m": flag --host is set by aim`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("got error %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsEveryReservedFlag(t *testing.T) {
+	for _, group := range reservedFlagGroups {
+		for _, flag := range group.names {
+			t.Run(flag, func(t *testing.T) {
+				yaml := fmt.Sprintf("models:\n  m:\n    type: llama-server\n    flags:\n      %s: true\n", flag)
+				_, err := Load(writeConfig(t, yaml))
+				want := fmt.Sprintf(`model "m": flag %s %s`, flag, group.reason)
+				if err == nil || err.Error() != want {
+					t.Errorf("got error %v, want %q", err, want)
+				}
+			})
+		}
 	}
 }
 
@@ -404,48 +668,6 @@ server:
 			}
 			if got := cfg.DefaultServer().SlotMaxFiles; got != tt.want {
 				t.Errorf("got %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultServerInferenceDelay(t *testing.T) {
-	tests := []struct {
-		name string
-		yaml string
-		want time.Duration
-	}{
-		{
-			name: "default",
-			yaml: "",
-			want: 1 * time.Second,
-		},
-		{
-			name: "configured",
-			yaml: `
-server:
-  inference_delay: 5s
-`,
-			want: 5 * time.Second,
-		},
-		{
-			name: "zero falls back to default",
-			yaml: `
-server:
-  inference_delay: 0s
-`,
-			want: 1 * time.Second,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := Load(writeConfig(t, tt.yaml))
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			if got := cfg.DefaultServer().InferenceDelay; got != tt.want {
-				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,15 +22,41 @@ const (
 	selectorPortRange     = 55536
 	defaultSlotExpiration = time.Hour
 	defaultSlotMaxFiles   = 3
-	defaultInferenceDelay = 1 * time.Second
 	defaultIdleTimeout    = 5 * time.Minute
 	defaultLlamaServerURL = "http://127.0.0.1:%d"
+	defaultSlots          = 1
 )
 
 const (
 	ModelTypeChatCompletion = "chat-completion"
 	ModelTypeLlamaServer    = "llama-server"
 )
+
+type reservedFlags struct {
+	names  []string
+	reason string
+}
+
+var reservedFlagGroups = []reservedFlags{
+	{names: []string{"-np", "--parallel"}, reason: "is set by aim from slots"},
+	{names: []string{"-c", "--ctx-size"}, reason: "is set by aim from ctx"},
+	{names: []string{"--kv-unified-per-slot"}, reason: "is replaced by ctx"},
+	{names: []string{"-kvu", "--kv-unified", "-no-kvu", "--no-kv-unified"}, reason: "is not supported: unified KV purges idle slots that aim keeps cached"},
+	{names: []string{
+		"--offline",
+		"--cors-credentials",
+		"--no-cors-credentials",
+		"--cors-origins",
+		"--ui",
+		"--webui",
+		"--no-ui",
+		"--no-webui",
+		"--host",
+		"--port",
+		"--log-colors",
+		"--slot-save-path",
+	}, reason: "is set by aim"},
+}
 
 type LlamaCppFlags struct {
 	Inherit string         `yaml:"inherit"`
@@ -55,6 +82,8 @@ type LlamaCppEntry struct {
 	URL         string
 	Port        int
 	StopTimeout time.Duration
+	Slots       int
+	Ctx         int
 	Flags       map[string]any
 }
 
@@ -67,6 +96,8 @@ type ModelEntry struct {
 	Bin         string         `yaml:"bin"`
 	URL         string         `yaml:"url"`
 	StopTimeout int            `yaml:"stop_timeout"`
+	Slots       *int           `yaml:"slots"`
+	Ctx         *int           `yaml:"ctx"`
 }
 
 type ProviderEntry struct {
@@ -80,7 +111,6 @@ type ServerConfig struct {
 	SaveSlotPath   string        `yaml:"save_slot_path"`
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
 	SlotMaxFiles   int           `yaml:"slot_max_files"`
-	InferenceDelay time.Duration `yaml:"inference_delay"`
 	IdleTimeout    *int          `yaml:"idle_timeout"`
 }
 
@@ -172,9 +202,6 @@ func (c *Config) DefaultServer() ServerConfig {
 	if c.Server.SlotMaxFiles <= 0 {
 		c.Server.SlotMaxFiles = defaultSlotMaxFiles
 	}
-	if c.Server.InferenceDelay <= 0 {
-		c.Server.InferenceDelay = defaultInferenceDelay
-	}
 	if c.Server.IdleTimeout == nil {
 		defaultIdleTimeoutSeconds := int(defaultIdleTimeout / time.Second)
 		c.Server.IdleTimeout = &defaultIdleTimeoutSeconds
@@ -229,10 +256,18 @@ func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppE
 		}
 		flags = template.overlay(flags)
 	}
-	for name := range flags.Args {
-		if !strings.HasPrefix(name, "-") {
-			return nil, fmt.Errorf("model %q: unknown setting %q (llama-server flags start with - or --)", selector, name)
+	for _, name := range sortedFlagNames(flags.Args) {
+		if err := validateFlagName(selector, name); err != nil {
+			return nil, err
 		}
+	}
+	slots, err := slotCount(selector, entry.Slots)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := slotContext(selector, entry.Ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	llama := &LlamaCppEntry{
@@ -240,9 +275,52 @@ func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppE
 		URL:         cmp.Or(entry.URL, flags.URL),
 		Port:        cmp.Or(flags.Port, portFromSelector(selector)),
 		StopTimeout: time.Duration(cmp.Or(entry.StopTimeout, 30)) * time.Second,
+		Slots:       slots,
+		Ctx:         ctx,
 		Flags:       flags.Args,
 	}
 	return llama, nil
+}
+
+func sortedFlagNames(flags map[string]any) []string {
+	names := make([]string, 0, len(flags))
+	for name := range flags {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func validateFlagName(selector string, name string) error {
+	if !strings.HasPrefix(name, "-") {
+		return fmt.Errorf("model %q: unknown setting %q (llama-server flags start with - or --)", selector, name)
+	}
+	for _, group := range reservedFlagGroups {
+		if slices.Contains(group.names, name) {
+			return fmt.Errorf("model %q: flag %s %s", selector, name, group.reason)
+		}
+	}
+	return nil
+}
+
+func slotCount(selector string, slots *int) (int, error) {
+	if slots == nil {
+		return defaultSlots, nil
+	}
+	if *slots < 0 {
+		return 0, fmt.Errorf("model %q: slots must be >= 0", selector)
+	}
+	return *slots, nil
+}
+
+func slotContext(selector string, ctx *int) (int, error) {
+	if ctx == nil {
+		return 0, nil
+	}
+	if *ctx <= 0 {
+		return 0, fmt.Errorf("model %q: ctx must be > 0", selector)
+	}
+	return *ctx, nil
 }
 
 func portFromSelector(selector string) int {
