@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,8 +92,16 @@ func (l *Logger) LogRequest(method, path, model, remoteAddr string) {
 func (l *Logger) LogResponse(status int, duration time.Duration) {
 	l.Info("response",
 		"status", status,
-		"duration", duration.String(),
+		Seconds("duration", duration),
 	)
+}
+
+func Seconds(key string, duration time.Duration) slog.Attr {
+	return slog.String(key, formatSeconds(duration))
+}
+
+func formatSeconds(duration time.Duration) string {
+	return strconv.FormatFloat(duration.Round(time.Millisecond).Seconds(), 'f', -1, 64) + "s"
 }
 
 func (l *Logger) LogError(msg string, err error, attrs ...any) {
