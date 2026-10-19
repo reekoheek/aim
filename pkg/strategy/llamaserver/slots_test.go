@@ -286,9 +286,10 @@ func (f *fakeSlotServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := r.URL.Query().Get("action")
+	slotID := strings.TrimPrefix(r.URL.Path, "/slots/")
 
 	f.mu.Lock()
-	f.actions = append(f.actions, action+" "+body.Filename)
+	f.actions = append(f.actions, action+" "+slotID+" "+body.Filename)
 	f.mu.Unlock()
 
 	switch {
@@ -317,7 +318,7 @@ func (f *fakeSlotServer) recorded() []string {
 	return slices.Clone(f.actions)
 }
 
-func newTestSlotCache(t *testing.T, existing []string, failRestore []string, maxFiles int, done <-chan struct{}) (*slotCache, *fakeSlotServer) {
+func newTestSlotCache(t *testing.T, slotCount int, existing []string, failRestore []string, maxFiles int, done <-chan struct{}) (*slotCache, *fakeSlotServer) {
 	t.Helper()
 	dir := t.TempDir()
 	fake := &fakeSlotServer{dir: dir, failRestore: map[string]bool{}}
@@ -325,7 +326,7 @@ func newTestSlotCache(t *testing.T, existing []string, failRestore []string, max
 	t.Cleanup(httpServer.Close)
 
 	server := config.ServerConfig{SlotExpiration: time.Hour, SlotMaxFiles: maxFiles}
-	cache := newSlotCache(dir, "m", httpServer.URL, server, logger.New("ERROR"), done)
+	cache := newSlotCache(dir, "m", httpServer.URL, slotCount, server, logger.New("ERROR"), done)
 	for _, session := range existing {
 		if err := os.WriteFile(filepath.Join(dir, cache.file(session)), []byte("kv"), 0o644); err != nil {
 			t.Fatal(err)
@@ -337,22 +338,86 @@ func newTestSlotCache(t *testing.T, existing []string, failRestore []string, max
 	return cache, fake
 }
 
-func runSlotRequests(t *testing.T, cache *slotCache, sessions []string) {
+func runSlotRequests(t *testing.T, cache *slotCache, sessions []string) []int {
 	t.Helper()
+	var slotIDs []int
 	for _, session := range sessions {
-		release, err := cache.acquire(context.Background(), session)
+		slotID, release, err := cache.acquire(context.Background(), session)
 		if err != nil {
 			t.Fatalf("acquire(%q): %v", session, err)
 		}
 		release()
+		slotIDs = append(slotIDs, slotID)
 	}
+	return slotIDs
+}
+
+func holdSlot(t *testing.T, cache *slotCache, session string) func() {
+	t.Helper()
+	_, release, err := cache.acquire(context.Background(), session)
+	if err != nil {
+		t.Fatalf("acquire(%q): %v", session, err)
+	}
+	return release
+}
+
+type slotGrant struct {
+	slotID  int
+	release func()
+	err     error
+}
+
+func acquireSlotAsync(ctx context.Context, cache *slotCache, session string) <-chan slotGrant {
+	granted := make(chan slotGrant, 1)
+	go func() {
+		slotID, release, err := cache.acquire(ctx, session)
+		granted <- slotGrant{slotID: slotID, release: release, err: err}
+	}()
+	return granted
+}
+
+func queueSlotRequest(t *testing.T, cache *slotCache, session string) <-chan slotGrant {
+	t.Helper()
+	queuedBefore := waitingRequests(cache)
+	granted := acquireSlotAsync(context.Background(), cache, session)
+	waitUntil(t, time.Second, "request for "+session+" queued", func() bool {
+		return waitingRequests(cache) == queuedBefore+1
+	})
+	return granted
+}
+
+func expectNoGrant(t *testing.T, granted <-chan slotGrant, what string) {
+	t.Helper()
+	select {
+	case grant := <-granted:
+		t.Fatalf("%s got slot %d (error %v) while it should wait", what, grant.slotID, grant.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func waitingRequests(cache *slotCache) int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return len(cache.waiters)
+}
+
+func busySlots(cache *slotCache) int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	busy := 0
+	for _, slot := range cache.slots {
+		if slot.busy {
+			busy++
+		}
+	}
+	return busy
 }
 
 func expectedActions(cache *slotCache, actions []string) []string {
 	var expected []string
 	for _, action := range actions {
-		name, session, _ := strings.Cut(action, " ")
-		expected = append(expected, name+" "+cache.file(session))
+		parts := strings.SplitN(action, " ", 3)
+		expected = append(expected, parts[0]+" "+parts[1]+" "+cache.file(parts[2]))
 	}
 	return expected
 }
@@ -373,36 +438,36 @@ func TestSlotCacheAcquireSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
 		{
 			name:     "switching session saves the previous one",
 			requests: []string{"a", "b"},
-			want:     []string{"save a"},
+			want:     []string{"save 0 a"},
 		},
 		{
 			name:     "switching back restores the saved session",
 			requests: []string{"a", "b", "a"},
-			want:     []string{"save a", "save b", "restore a"},
+			want:     []string{"save 0 a", "save 0 b", "restore 0 a"},
 		},
 		{
 			name:     "existing cache is restored on the first request",
 			existing: []string{"a"},
 			requests: []string{"a", "a"},
-			want:     []string{"restore a"},
+			want:     []string{"restore 0 a"},
 		},
 		{
 			name:        "session is saved after a failed restore",
 			existing:    []string{"a"},
 			failRestore: []string{"a"},
 			requests:    []string{"a", "b"},
-			want:        []string{"restore a", "save a"},
+			want:        []string{"restore 0 a", "save 0 a"},
 		},
 		{
 			name:     "session-less request evicts the session",
 			requests: []string{"a", "", "a"},
-			want:     []string{"save a", "restore a"},
+			want:     []string{"save 0 a", "restore 0 a"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, fake := newTestSlotCache(t, tt.existing, tt.failRestore, 0, runningProcess())
+			cache, fake := newTestSlotCache(t, 1, tt.existing, tt.failRestore, 0, runningProcess())
 			runSlotRequests(t, cache, tt.requests)
 			if got, want := fake.recorded(), expectedActions(cache, tt.want); !slices.Equal(got, want) {
 				t.Errorf("got %q, want %q", got, want)
@@ -411,51 +476,255 @@ func TestSlotCacheAcquireSavesAndRestoresOnlyOnSessionSwitch(t *testing.T) {
 	}
 }
 
-func TestSlotCacheAcquireKeepsRecentlyUsedSlotFiles(t *testing.T) {
+func TestSlotCacheAcquireSpreadsSessionsOverSlots(t *testing.T) {
 	tests := []struct {
 		name      string
-		maxFiles  int
+		slotCount int
+		existing  []string
 		requests  []string
+		wantSlots []int
 		want      []string
-		wantFiles []string
 	}{
 		{
-			name:      "least recently used session removed over the limit",
-			maxFiles:  2,
-			requests:  []string{"a", "b", "c", "d"},
-			want:      []string{"save a", "save b", "save c"},
-			wantFiles: []string{"b", "c"},
+			name:      "each session keeps its own slot",
+			slotCount: 2,
+			requests:  []string{"a", "b", "a", "b"},
+			wantSlots: []int{0, 1, 0, 1},
+			want:      nil,
 		},
 		{
-			name:      "requested session counts as used before the limit is applied",
-			maxFiles:  2,
+			name:      "new session evicts the least recently used slot",
+			slotCount: 2,
+			requests:  []string{"a", "b", "c"},
+			wantSlots: []int{0, 1, 0},
+			want:      []string{"save 0 a"},
+		},
+		{
+			name:      "returning session refreshes its slot before eviction",
+			slotCount: 2,
+			requests:  []string{"a", "b", "a", "c"},
+			wantSlots: []int{0, 1, 0, 1},
+			want:      []string{"save 1 b"},
+		},
+		{
+			name:      "evicted session is restored into the least recently used slot",
+			slotCount: 2,
 			requests:  []string{"a", "b", "c", "a"},
-			want:      []string{"save a", "save b", "save c", "restore a"},
-			wantFiles: []string{"a", "c"},
+			wantSlots: []int{0, 1, 0, 1},
+			want:      []string{"save 0 a", "save 1 b", "restore 1 a"},
 		},
 		{
-			name:      "requested session is restored before the limit is applied",
-			maxFiles:  1,
-			requests:  []string{"a", "b", "a"},
-			want:      []string{"save a", "save b", "restore a"},
-			wantFiles: []string{"b"},
+			name:      "session-less request uses an empty slot",
+			slotCount: 2,
+			requests:  []string{"a", "", "a"},
+			wantSlots: []int{0, 1, 0},
+			want:      nil,
+		},
+		{
+			name:      "empty slot is used before evicting a session",
+			slotCount: 3,
+			existing:  []string{"c"},
+			requests:  []string{"a", "b", "a", "c"},
+			wantSlots: []int{0, 1, 0, 2},
+			want:      []string{"restore 2 c"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, fake := newTestSlotCache(t, nil, nil, tt.maxFiles, runningProcess())
-			runSlotRequests(t, cache, tt.requests)
+			cache, fake := newTestSlotCache(t, tt.slotCount, tt.existing, nil, 0, runningProcess())
+			if got := runSlotRequests(t, cache, tt.requests); !slices.Equal(got, tt.wantSlots) {
+				t.Errorf("slots %v, want %v", got, tt.wantSlots)
+			}
 			if got, want := fake.recorded(), expectedActions(cache, tt.want); !slices.Equal(got, want) {
 				t.Errorf("actions %q, want %q", got, want)
 			}
-			var wantFiles []string
-			for _, session := range tt.wantFiles {
-				wantFiles = append(wantFiles, cache.file(session))
+		})
+	}
+}
+
+func TestSlotCacheAcquireWhileSlotsAreHeld(t *testing.T) {
+	tests := []struct {
+		name      string
+		slotCount int
+		held      []string
+		next      string
+		wantWait  bool
+		wantSlot  int
+	}{
+		{
+			name:      "other session runs in parallel on a free slot",
+			slotCount: 2,
+			held:      []string{"a"},
+			next:      "b",
+			wantSlot:  1,
+		},
+		{
+			name:      "session-less requests run in parallel",
+			slotCount: 2,
+			held:      []string{""},
+			next:      "",
+			wantSlot:  1,
+		},
+		{
+			name:      "same session waits for its own slot while another is free",
+			slotCount: 2,
+			held:      []string{"a"},
+			next:      "a",
+			wantWait:  true,
+			wantSlot:  0,
+		},
+		{
+			name:      "request waits while every slot is busy",
+			slotCount: 1,
+			held:      []string{"a"},
+			next:      "b",
+			wantWait:  true,
+			wantSlot:  0,
+		},
+		{
+			name:      "request takes the first slot released",
+			slotCount: 2,
+			held:      []string{"a", "b"},
+			next:      "c",
+			wantWait:  true,
+			wantSlot:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, _ := newTestSlotCache(t, tt.slotCount, nil, nil, 0, runningProcess())
+			var releases []func()
+			for _, session := range tt.held {
+				releases = append(releases, holdSlot(t, cache, session))
 			}
-			slices.Sort(wantFiles)
-			if got := remainingNames(t, cache.dir); !slices.Equal(got, wantFiles) {
-				t.Errorf("files %q, want %q", got, wantFiles)
+
+			var granted <-chan slotGrant
+			if tt.wantWait {
+				granted = queueSlotRequest(t, cache, tt.next)
+				expectNoGrant(t, granted, "request for "+tt.next)
+				releases[0]()
+				releases = releases[1:]
+			} else {
+				granted = acquireSlotAsync(context.Background(), cache, tt.next)
+			}
+
+			grant := receiveWithin(t, granted, time.Second, "request for "+tt.next)
+			if grant.err != nil {
+				t.Fatal(grant.err)
+			}
+			grant.release()
+			for _, release := range releases {
+				release()
+			}
+			if grant.slotID != tt.wantSlot {
+				t.Errorf("slot %d, want %d", grant.slotID, tt.wantSlot)
+			}
+		})
+	}
+}
+
+func TestSlotCacheHandsReleasedSlotToWaitingRequests(t *testing.T) {
+	tests := []struct {
+		name        string
+		queued      []string
+		wantOrder   []string
+		wantActions []string
+	}{
+		{
+			name:        "waiting requests are served in arrival order",
+			queued:      []string{"b", "c"},
+			wantOrder:   []string{"b", "c"},
+			wantActions: []string{"save 0 a", "save 0 b"},
+		},
+		{
+			name:        "session waiting for its own slot goes before earlier requests",
+			queued:      []string{"b", "a"},
+			wantOrder:   []string{"a", "b"},
+			wantActions: []string{"save 0 a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fake := newTestSlotCache(t, 1, nil, nil, 0, runningProcess())
+			release := holdSlot(t, cache, "a")
+			grants := map[string]<-chan slotGrant{}
+			for _, session := range tt.queued {
+				grants[session] = queueSlotRequest(t, cache, session)
+			}
+
+			for i, session := range tt.wantOrder {
+				release()
+				grant := receiveWithin(t, grants[session], time.Second, "request for "+session)
+				if grant.err != nil {
+					t.Fatal(grant.err)
+				}
+				for _, later := range tt.wantOrder[i+1:] {
+					expectNoGrant(t, grants[later], "request for "+later)
+				}
+				release = grant.release
+			}
+			release()
+
+			if got, want := fake.recorded(), expectedActions(cache, tt.wantActions); !slices.Equal(got, want) {
+				t.Errorf("actions %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestSlotCacheAbandonedRequestLeavesSlotUntouched(t *testing.T) {
+	tests := []struct {
+		name    string
+		abandon func(t *testing.T, cache *slotCache)
+	}{
+		{
+			name: "canceled while waiting",
+			abandon: func(t *testing.T, cache *slotCache) {
+				release := holdSlot(t, cache, "a")
+				defer release()
+				ctx, cancel := context.WithCancel(context.Background())
+				queuedBefore := waitingRequests(cache)
+				granted := acquireSlotAsync(ctx, cache, "b")
+				waitUntil(t, time.Second, "request for b queued", func() bool {
+					return waitingRequests(cache) == queuedBefore+1
+				})
+				cancel()
+				if grant := receiveWithin(t, granted, time.Second, "canceled request"); !errors.Is(grant.err, context.Canceled) {
+					t.Errorf("error %v, want %v", grant.err, context.Canceled)
+				}
+			},
+		},
+		{
+			name: "given up after the slot was assigned",
+			abandon: func(t *testing.T, cache *slotCache) {
+				runSlotRequests(t, cache, []string{"a"})
+				waiter := &slotWaiter{session: "b", assigned: make(chan slotAssignment, 1)}
+				cache.mu.Lock()
+				cache.waiters = append(cache.waiters, waiter)
+				cache.dispatch()
+				cache.mu.Unlock()
+				cache.abandon(waiter)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fake := newTestSlotCache(t, 1, nil, nil, 0, runningProcess())
+			tt.abandon(t, cache)
+
+			slot := cache.slots[0]
+			if slot.session != "a" || !slot.unsaved || slot.busy {
+				t.Errorf("slot session %q unsaved %v busy %v, want %q unsaved and free", slot.session, slot.unsaved, slot.busy, "a")
+			}
+			if queued := waitingRequests(cache); queued != 0 {
+				t.Errorf("%d requests still waiting", queued)
+			}
+			if got := fake.recorded(); got != nil {
+				t.Errorf("actions %q, want none", got)
 			}
 		})
 	}
@@ -474,45 +743,59 @@ func TestSlotCacheAcquireGivesUpWhileSlotIsHeld(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, _ := newTestSlotCache(t, nil, nil, 0, tt.process)
-			cache.slot <- struct{}{}
+			cache, _ := newTestSlotCache(t, 1, nil, nil, 0, tt.process)
+			cache.slots[0].busy = true
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tt.canceled {
 				cancel()
 			}
 
-			if _, err := cache.acquire(ctx, "a"); !errors.Is(err, tt.want) {
+			if _, _, err := cache.acquire(ctx, "a"); !errors.Is(err, tt.want) {
 				t.Errorf("error %v, want %v", err, tt.want)
+			}
+			if queued := waitingRequests(cache); queued != 0 {
+				t.Errorf("%d requests still waiting", queued)
 			}
 		})
 	}
 }
 
-func TestSlotCacheShutdownSavesUnsavedSlot(t *testing.T) {
+func TestSlotCacheShutdownSavesUnsavedSlots(t *testing.T) {
 	tests := []struct {
 		name          string
+		slotCount     int
 		requests      []string
 		processExited bool
 		want          []string
 	}{
 		{
-			name:     "unsaved session is saved",
-			requests: []string{"a"},
-			want:     []string{"save a"},
+			name:      "unsaved session is saved",
+			slotCount: 1,
+			requests:  []string{"a"},
+			want:      []string{"save 0 a"},
 		},
 		{
-			name:     "session-less request leaves nothing to save",
-			requests: []string{""},
-			want:     nil,
+			name:      "session-less request leaves nothing to save",
+			slotCount: 1,
+			requests:  []string{""},
+			want:      nil,
 		},
 		{
-			name:     "session saved on switch is not saved again",
-			requests: []string{"a", "b"},
-			want:     []string{"save a", "save b"},
+			name:      "session saved on switch is not saved again",
+			slotCount: 1,
+			requests:  []string{"a", "b"},
+			want:      []string{"save 0 a", "save 0 b"},
+		},
+		{
+			name:      "every slot with an unsaved session is saved",
+			slotCount: 3,
+			requests:  []string{"a", "b", "a"},
+			want:      []string{"save 0 a", "save 1 b"},
 		},
 		{
 			name:          "exited process is not asked to save",
+			slotCount:     1,
 			requests:      []string{"a"},
 			processExited: true,
 			want:          nil,
@@ -522,7 +805,7 @@ func TestSlotCacheShutdownSavesUnsavedSlot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			process := make(chan struct{})
-			cache, fake := newTestSlotCache(t, nil, nil, 0, process)
+			cache, fake := newTestSlotCache(t, tt.slotCount, nil, nil, 0, process)
 			runSlotRequests(t, cache, tt.requests)
 			if tt.processExited {
 				close(process)
@@ -537,12 +820,34 @@ func TestSlotCacheShutdownSavesUnsavedSlot(t *testing.T) {
 	}
 }
 
-func TestSlotCacheShutdownGivesUpWhenContextEnds(t *testing.T) {
-	cache, fake := newTestSlotCache(t, nil, nil, 0, runningProcess())
-	release, err := cache.acquire(context.Background(), "a")
-	if err != nil {
-		t.Fatal(err)
+func TestSlotCacheShutdownWaitsForEverySlot(t *testing.T) {
+	cache, fake := newTestSlotCache(t, 2, nil, nil, 0, runningProcess())
+	releaseA := holdSlot(t, cache, "a")
+	releaseB := holdSlot(t, cache, "b")
+
+	shutdown := make(chan struct{})
+	go func() {
+		cache.shutdown(context.Background())
+		close(shutdown)
+	}()
+
+	releaseA()
+	select {
+	case <-shutdown:
+		t.Fatal("shutdown finished while a request still held a slot")
+	case <-time.After(100 * time.Millisecond):
 	}
+	releaseB()
+
+	receiveWithin(t, shutdown, time.Second, "shutdown after every slot is released")
+	if got, want := fake.recorded(), expectedActions(cache, []string{"save 0 a", "save 1 b"}); !slices.Equal(got, want) {
+		t.Errorf("actions %q, want %q", got, want)
+	}
+}
+
+func TestSlotCacheShutdownGivesUpWhenContextEnds(t *testing.T) {
+	cache, fake := newTestSlotCache(t, 1, nil, nil, 0, runningProcess())
+	release := holdSlot(t, cache, "a")
 	defer release()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -561,40 +866,43 @@ func TestSlotCacheShutdownGivesUpWhenContextEnds(t *testing.T) {
 
 func TestSlotCacheRejectsRequestsAfterShutdown(t *testing.T) {
 	process := make(chan struct{})
-	cache, _ := newTestSlotCache(t, nil, nil, 0, process)
+	cache, _ := newTestSlotCache(t, 2, nil, nil, 0, process)
 	cache.shutdown(context.Background())
 	close(process)
 
-	if _, err := cache.acquire(context.Background(), "a"); !errors.Is(err, errServerExited) {
+	if _, _, err := cache.acquire(context.Background(), "a"); !errors.Is(err, errServerExited) {
 		t.Errorf("error %v, want %v", err, errServerExited)
 	}
 }
 
-func TestSlotCachePin(t *testing.T) {
+func TestPinSlot(t *testing.T) {
 	tests := []struct {
 		name   string
+		slotID int
 		fields map[string]json.RawMessage
 		want   map[string]string
 	}{
 		{
 			name:   "empty body",
+			slotID: 0,
 			fields: map[string]json.RawMessage{},
 			want:   map[string]string{"id_slot": "0", "cache_prompt": "true"},
 		},
 		{
-			name: "client slot settings are overridden and other fields kept",
+			name:   "client slot settings are overridden and other fields kept",
+			slotID: 2,
 			fields: map[string]json.RawMessage{
 				"model":        json.RawMessage(`"a"`),
 				"id_slot":      json.RawMessage(`3`),
 				"cache_prompt": json.RawMessage(`false`),
 			},
-			want: map[string]string{"model": `"a"`, "id_slot": "0", "cache_prompt": "true"},
+			want: map[string]string{"model": `"a"`, "id_slot": "2", "cache_prompt": "true"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			(&slotCache{}).pin(tt.fields)
+			pinSlot(tt.fields, tt.slotID)
 
 			got := map[string]string{}
 			for name, value := range tt.fields {

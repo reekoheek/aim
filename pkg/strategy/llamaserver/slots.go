@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/reekoheek/aim/internal/logger"
@@ -25,7 +26,6 @@ import (
 )
 
 const (
-	cacheSlot             = 0
 	slotSavePathFlag      = "--slot-save-path"
 	slotFileExtension     = ".bin"
 	slotFileSeparator     = "--"
@@ -41,6 +41,29 @@ var slotClient = &http.Client{Timeout: time.Minute}
 
 var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+type cacheSlot struct {
+	id       int
+	session  string
+	unsaved  bool
+	busy     bool
+	lastUsed uint64
+}
+
+func (s *cacheSlot) empty() bool {
+	return s.session == ""
+}
+
+type slotWaiter struct {
+	session  string
+	assigned chan slotAssignment
+}
+
+type slotAssignment struct {
+	slot            *cacheSlot
+	previousSession string
+	previousUnsaved bool
+}
+
 type slotCache struct {
 	dir        string
 	selector   string
@@ -49,12 +72,20 @@ type slotCache struct {
 	maxFiles   int
 	logger     *logger.Logger
 	done       <-chan struct{}
-	slot       chan struct{}
-	session    string
-	unsaved    bool
+	drained    chan struct{}
+	fileMu     sync.Mutex
+	mu         sync.Mutex
+	slots      []*cacheSlot
+	waiters    []*slotWaiter
+	releases   uint64
+	closing    bool
 }
 
-func newSlotCache(dir string, selector string, baseURL string, server config.ServerConfig, l *logger.Logger, done <-chan struct{}) *slotCache {
+func newSlotCache(dir string, selector string, baseURL string, slotCount int, server config.ServerConfig, l *logger.Logger, done <-chan struct{}) *slotCache {
+	slots := make([]*cacheSlot, slotCount)
+	for id := range slots {
+		slots[id] = &cacheSlot{id: id}
+	}
 	return &slotCache{
 		dir:        dir,
 		selector:   selector,
@@ -63,7 +94,8 @@ func newSlotCache(dir string, selector string, baseURL string, server config.Ser
 		maxFiles:   server.SlotMaxFiles,
 		logger:     l,
 		done:       done,
-		slot:       make(chan struct{}, 1),
+		drained:    make(chan struct{}),
+		slots:      slots,
 	}
 }
 
@@ -86,62 +118,189 @@ func withSlotSavePath(entry *config.LlamaCppEntry, dir string) *config.LlamaCppE
 	return &withSlots
 }
 
-func (c *slotCache) acquire(ctx context.Context, sessionID string) (release func(), err error) {
+func (c *slotCache) acquire(ctx context.Context, sessionID string) (slotID int, release func(), err error) {
 	start := time.Now()
+	waiter := &slotWaiter{session: sessionID, assigned: make(chan slotAssignment, 1)}
+	c.mu.Lock()
+	c.waiters = append(c.waiters, waiter)
+	c.dispatch()
+	c.mu.Unlock()
+
+	var assignment slotAssignment
 	select {
-	case c.slot <- struct{}{}:
+	case assignment = <-waiter.assigned:
 	case <-c.done:
-		return nil, errServerExited
+		c.abandon(waiter)
+		return 0, nil, errServerExited
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		c.abandon(waiter)
+		return 0, nil, ctx.Err()
 	}
+	slot := assignment.slot
 	acquired := time.Now()
 	c.logger.Info("slot acquired",
-		slog.Int("slot", cacheSlot),
+		slog.Int("slot", slot.id),
 		slog.String("session", sessionID),
 		slog.Duration("waited", acquired.Sub(start)),
 	)
 
-	if c.session != sessionID {
-		c.markUsed(sessionID)
-		c.saveUnsaved()
-		c.session = ""
-		if sessionID != "" && c.restore(sessionID) {
-			c.session = sessionID
-		}
-		c.prune()
+	if assignment.previousSession != sessionID {
+		c.switchSession(assignment, sessionID)
 	}
 
-	return func() {
-		defer func() { <-c.slot }()
-
-		if sessionID != "" {
-			c.session = sessionID
-			c.unsaved = true
-		}
-
+	return slot.id, func() {
+		c.release(slot, sessionID)
 		c.logger.Info("slot released",
-			slog.Int("slot", cacheSlot),
+			slog.Int("slot", slot.id),
 			slog.String("session", sessionID),
 			slog.Duration("held", time.Since(acquired)),
 		)
 	}, nil
 }
 
-func (c *slotCache) pin(fields map[string]json.RawMessage) {
-	fields["id_slot"], _ = json.Marshal(cacheSlot)
+func (c *slotCache) dispatch() {
+	if c.closing {
+		c.signalDrainedWhenIdle()
+		return
+	}
+	c.serveWaiters(c.residentSlot)
+	c.serveWaiters(c.slotFor)
+}
+
+func (c *slotCache) serveWaiters(pick func(session string) *cacheSlot) {
+	waiting := c.waiters[:0]
+	for _, waiter := range c.waiters {
+		slot := pick(waiter.session)
+		if slot == nil || slot.busy {
+			waiting = append(waiting, waiter)
+			continue
+		}
+		c.assign(waiter, slot)
+	}
+	clear(c.waiters[len(waiting):])
+	c.waiters = waiting
+}
+
+func (c *slotCache) residentSlot(session string) *cacheSlot {
+	if session == "" {
+		return nil
+	}
+	for _, slot := range c.slots {
+		if slot.session == session {
+			return slot
+		}
+	}
+	return nil
+}
+
+func (c *slotCache) slotFor(session string) *cacheSlot {
+	if slot := c.residentSlot(session); slot != nil {
+		return slot
+	}
+	return c.freeSlotToEvict()
+}
+
+func (c *slotCache) freeSlotToEvict() *cacheSlot {
+	var chosen *cacheSlot
+	for _, slot := range c.slots {
+		if !slot.busy && (chosen == nil || evictsBefore(slot, chosen)) {
+			chosen = slot
+		}
+	}
+	return chosen
+}
+
+func evictsBefore(slot *cacheSlot, other *cacheSlot) bool {
+	if slot.empty() != other.empty() {
+		return slot.empty()
+	}
+	return slot.lastUsed < other.lastUsed
+}
+
+func (c *slotCache) assign(waiter *slotWaiter, slot *cacheSlot) {
+	waiter.assigned <- slotAssignment{slot: slot, previousSession: slot.session, previousUnsaved: slot.unsaved}
+	slot.busy = true
+	if slot.session != waiter.session {
+		slot.session = waiter.session
+		slot.unsaved = false
+	}
+}
+
+func (c *slotCache) abandon(waiter *slotWaiter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if index := slices.Index(c.waiters, waiter); index >= 0 {
+		c.waiters = slices.Delete(c.waiters, index, index+1)
+		return
+	}
+	assignment := <-waiter.assigned
+	assignment.slot.session = assignment.previousSession
+	assignment.slot.unsaved = assignment.previousUnsaved
+	assignment.slot.busy = false
+	c.dispatch()
+}
+
+func (c *slotCache) release(slot *cacheSlot, sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.releases++
+	slot.lastUsed = c.releases
+	slot.busy = false
+	if sessionID != "" {
+		slot.unsaved = true
+	}
+	c.dispatch()
+}
+
+func (c *slotCache) switchSession(assignment slotAssignment, sessionID string) {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+
+	slotID := assignment.slot.id
+	c.markUsed(sessionID)
+	if assignment.previousUnsaved {
+		c.save(slotID, assignment.previousSession)
+	}
+	if sessionID != "" {
+		c.restore(slotID, sessionID)
+	}
+	c.prune()
+}
+
+func pinSlot(fields map[string]json.RawMessage, slotID int) {
+	fields["id_slot"], _ = json.Marshal(slotID)
 	fields["cache_prompt"], _ = json.Marshal(true)
 }
 
 func (c *slotCache) shutdown(ctx context.Context) {
+	c.mu.Lock()
+	c.closing = true
+	c.signalDrainedWhenIdle()
+	c.mu.Unlock()
+
 	select {
-	case c.slot <- struct{}{}:
+	case <-c.drained:
 		if !c.processExited() {
-			c.saveUnsaved()
+			c.saveUnsavedSlots()
 			c.prune()
 		}
 	case <-c.done:
 	case <-ctx.Done():
+	}
+}
+
+func (c *slotCache) signalDrainedWhenIdle() {
+	for _, slot := range c.slots {
+		if slot.busy {
+			return
+		}
+	}
+	select {
+	case <-c.drained:
+	default:
+		close(c.drained)
 	}
 }
 
@@ -154,14 +313,26 @@ func (c *slotCache) processExited() bool {
 	}
 }
 
-func (c *slotCache) saveUnsaved() {
-	if c.session == "" || !c.unsaved {
-		return
+func (c *slotCache) saveUnsavedSlots() {
+	c.mu.Lock()
+	var unsaved []cacheSlot
+	for _, slot := range c.slots {
+		if slot.unsaved {
+			unsaved = append(unsaved, *slot)
+			slot.unsaved = false
+		}
 	}
-	file := c.file(c.session)
-	c.unsaved = false
-	if err := c.action("save", file); err != nil {
-		c.logger.LogError("failed to save slot", err, slog.String("session", c.session), slog.String("file", file))
+	c.mu.Unlock()
+
+	for _, slot := range unsaved {
+		c.save(slot.id, slot.session)
+	}
+}
+
+func (c *slotCache) save(slotID int, sessionID string) {
+	file := c.file(sessionID)
+	if err := c.action(slotID, "save", file); err != nil {
+		c.logger.LogError("failed to save slot", err, slog.Int("slot", slotID), slog.String("session", sessionID), slog.String("file", file))
 	}
 }
 
@@ -180,16 +351,14 @@ func (c *slotCache) markUsed(sessionID string) {
 	}
 }
 
-func (c *slotCache) restore(sessionID string) bool {
+func (c *slotCache) restore(slotID int, sessionID string) {
 	file := c.file(sessionID)
 	if _, err := os.Stat(filepath.Join(c.dir, file)); err != nil {
-		return true
+		return
 	}
-	if err := c.action("restore", file); err != nil {
-		c.logger.LogError("failed to restore slot", err, slog.String("session", sessionID), slog.String("file", file))
-		return false
+	if err := c.action(slotID, "restore", file); err != nil {
+		c.logger.LogError("failed to restore slot", err, slog.Int("slot", slotID), slog.String("session", sessionID), slog.String("file", file))
 	}
-	return true
 }
 
 func (c *slotCache) file(sessionID string) string {
@@ -205,9 +374,9 @@ func sanitizeFileName(id string) string {
 	return unsafeFileNameChars.ReplaceAllString(id, "--")
 }
 
-func (c *slotCache) action(action string, file string) error {
+func (c *slotCache) action(slotID int, action string, file string) error {
 	start := time.Now()
-	url := fmt.Sprintf("%s/slots/%d?action=%s", c.baseURL, cacheSlot, action)
+	url := fmt.Sprintf("%s/slots/%d?action=%s", c.baseURL, slotID, action)
 	payload, err := json.Marshal(map[string]string{"filename": file})
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
@@ -215,13 +384,13 @@ func (c *slotCache) action(action string, file string) error {
 
 	resp, err := slotClient.Post(url, "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("%s slot %d: %w", action, cacheSlot, err)
+		return fmt.Errorf("%s slot %d: %w", action, slotID, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s slot %d: status %d: %s", action, cacheSlot, resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s slot %d: status %d: %s", action, slotID, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var res struct {
@@ -231,7 +400,7 @@ func (c *slotCache) action(action string, file string) error {
 	_ = json.Unmarshal(body, &res)
 
 	c.logger.Info("slot cache", slog.String("action", action),
-		slog.Int("slot", cacheSlot),
+		slog.Int("slot", slotID),
 		slog.String("file", file),
 		slog.Int("tokens", res.NSaved+res.NRestored),
 		slog.Duration("took", time.Since(start)),
