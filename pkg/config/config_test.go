@@ -743,6 +743,58 @@ providers:
 			want: ModelEntry{Type: ModelTypeChatCompletion, Provider: "p", Model: "remote-m"},
 		},
 		{
+			name:     "systemone",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: systemone
+    provider: p
+    model: remote-decider
+providers:
+  p:
+    base_url: http://example.com
+`,
+			want: ModelEntry{Type: ModelTypeSystemOne, Provider: "p", Model: "remote-decider"},
+		},
+		{
+			name:     "systemone without provider",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: systemone
+    model: remote-decider
+`,
+			wantErr: `model "m" has empty provider`,
+		},
+		{
+			name:     "systemone without model name",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: systemone
+    provider: p
+providers:
+  p:
+    base_url: http://example.com
+`,
+			wantErr: `model "m" has empty model name`,
+		},
+		{
+			name:     "systemone with provider missing from config",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: systemone
+    provider: gone
+    model: remote-decider
+`,
+			wantErr: `provider "gone" not found in config`,
+		},
+		{
 			name:     "llama-server",
 			selector: "m",
 			yaml: `

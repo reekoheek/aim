@@ -53,7 +53,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 	}
 	req.Body = newBody
 
-	targetURL := provider.BaseURL + "/v1/chat/completions"
+	targetURL := provider.BaseURL + strategy.ChatCompletionsPath
 	extraHeaders := map[string]string{
 		"Authorization": "Bearer " + provider.APIKey,
 	}

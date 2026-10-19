@@ -9,6 +9,11 @@ import (
 )
 
 const (
+	ChatCompletionsPath = "/v1/chat/completions"
+	SystemOnePath       = "/v1/systemone"
+)
+
+const (
 	sessionAffinityHeader = "X-Session-Affinity"
 	noSession             = "-"
 )

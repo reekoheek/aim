@@ -29,6 +29,7 @@ const (
 
 const (
 	ModelTypeChatCompletion = "chat-completion"
+	ModelTypeSystemOne      = "systemone"
 	ModelTypeLlamaServer    = "llama-server"
 )
 
@@ -127,7 +128,7 @@ func (c *Config) ResolveModel(selector string) (ModelEntry, error) {
 		return ModelEntry{}, fmt.Errorf("model %q not found in config", selector)
 	}
 	switch entry.Type {
-	case ModelTypeChatCompletion:
+	case ModelTypeChatCompletion, ModelTypeSystemOne:
 		if err := c.validateChatCompletion(selector, entry); err != nil {
 			return ModelEntry{}, err
 		}

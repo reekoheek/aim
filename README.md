@@ -24,6 +24,10 @@ models:
     type: chat-completion
     provider: openai
     model: gpt-4
+  banyu-minipc/julia-1:
+    type: systemone
+    provider: banyu-minipc
+    model: julia-1
 
 providers:
   banyu-minipc:
@@ -98,6 +102,8 @@ models:
 
 llama-server itself also applies the `[*]` section of `~/.config/llama.cpp/config.ini` (or `$XDG_CONFIG_HOME/llama.cpp/config.ini`, `/etc/llama.cpp/config.ini`) to every run, including the ones aim starts.
 
+`chat-completion` models are served on `/v1/chat/completions`, `systemone` models on `/v1/systemone`; both forward to the provider's `base_url` with the provider's `api_key` and the entry's `model`. A `llama-server` model is served on either endpoint (see below).
+
 ## Usage
 
 ### Proxy endpoint
@@ -106,6 +112,31 @@ llama-server itself also applies the `[*]` section of `~/.config/llama.cpp/confi
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "banyu-minipc/qwen3.6-35b", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+### Decision endpoint
+
+`/v1/systemone` serves llama.cpp decision models (Julia-1, Kev-4B, …):
+
+```bash
+curl -X POST http://localhost:8080/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{"model": "julia-1", "state": "Customer: I was charged twice.", "questions": {"route": {"type": "choice", "instructions": "Which team?", "criteria": {"billing": "payments", "shipping": "delivery"}}}}'
+```
+
+- `model` and a non-empty `questions` object are required; everything else is passed to llama-server as-is. There is no streaming.
+- the model must be `type: systemone` (forwarded to the provider) or `type: llama-server`; a `chat-completion` model is rejected, and so is a `systemone` model on `/v1/chat/completions`
+- a `llama-server` decision model is a normal `llama-server` entry and takes turns with the chat models (one llama-server at a time). The slot cache is not used for it: llama-server picks the slots for decision requests itself, so `X-Session-Affinity` is ignored and nothing is saved or restored, and `slots: N` only sets how many questions run in parallel. A `llama-server` model that is not a decision model answers 501.
+
+```yaml
+models:
+  julia-1:
+    type: llama-server
+    slots: 8
+    ctx: 2048
+    flags:
+      -hf: ggml-org/Julia-1-GGUF:Q8_0
+      -ngl: 999
 ```
 
 ### With OpenAI SDK (Python)

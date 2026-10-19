@@ -18,6 +18,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/strategy"
 )
 
 func TestFlagArgs(t *testing.T) {
@@ -457,6 +458,8 @@ const (
 	fakeLlamaServerModeServe      = "serve"
 	fakeLlamaServerModeHang       = "hang"
 	fakeLlamaServerOrphanInterval = 100 * time.Millisecond
+	fakeChatCompletionResponse    = `{"choices":[]}`
+	fakeSystemOneResponse         = `{"answers":{}}`
 )
 
 func TestMain(m *testing.M) {
@@ -482,7 +485,23 @@ func runFakeLlamaServer(args []string) {
 	slotDir := argValue(args, "--slot-save-path")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {})
-	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+strategy.ChatCompletionsPath, fakeInference(fakeChatCompletionResponse))
+	mux.HandleFunc("POST "+strategy.SystemOnePath, fakeInference(fakeSystemOneResponse))
+	mux.HandleFunc("POST /slots/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Filename string `json:"filename"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if r.URL.Query().Get("action") == "save" {
+			os.WriteFile(filepath.Join(slotDir, body.Filename), []byte("kv"), 0o644)
+		}
+		fmt.Fprint(w, `{"n_saved": 1, "n_restored": 1}`)
+	})
+	http.ListenAndServe(net.JoinHostPort(argValue(args, "--host"), argValue(args, "--port")), mux)
+}
+
+func fakeInference(response string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		received, _ := io.ReadAll(r.Body)
 		var body struct {
 			FakeDelay  string `json:"fake_delay"`
@@ -498,19 +517,8 @@ func runFakeLlamaServer(args []string) {
 			w.Write(received)
 			return
 		}
-		fmt.Fprint(w, `{"choices":[]}`)
-	})
-	mux.HandleFunc("POST /slots/{id}", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Filename string `json:"filename"`
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		if r.URL.Query().Get("action") == "save" {
-			os.WriteFile(filepath.Join(slotDir, body.Filename), []byte("kv"), 0o644)
-		}
-		fmt.Fprint(w, `{"n_saved": 1, "n_restored": 1}`)
-	})
-	http.ListenAndServe(net.JoinHostPort(argValue(args, "--host"), argValue(args, "--port")), mux)
+		fmt.Fprint(w, response)
+	}
 }
 
 func argValue(args []string, name string) string {

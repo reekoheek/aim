@@ -1,7 +1,6 @@
 package chatcompletion
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,16 +22,12 @@ type Router struct {
 	llamaServers *llamaserver.Monitor
 }
 
-func New(cfg *config.Config, l *logger.Logger) *Router {
+func New(cfg *config.Config, l *logger.Logger, llamaServers *llamaserver.Monitor) *Router {
 	return &Router{
 		cfg:          cfg,
 		logger:       l,
-		llamaServers: llamaserver.NewMonitor(),
+		llamaServers: llamaServers,
 	}
-}
-
-func (r *Router) Close(ctx context.Context) {
-	r.llamaServers.Close(ctx)
 }
 
 func (r *Router) Handler(w http.ResponseWriter, req *http.Request) {
@@ -94,6 +89,8 @@ func (r *Router) newStrategy(selector string, entry config.ModelEntry) (strategy
 		return chatcompletion.NewStrategy(r.cfg, r.logger, entry.Provider, entry.Model), nil
 	case config.ModelTypeLlamaServer:
 		return llamaserver.NewStrategy(r.cfg, r.logger, r.llamaServers, selector), nil
+	case config.ModelTypeSystemOne:
+		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.SystemOnePath)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", entry.Type)
 	}

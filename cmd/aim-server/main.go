@@ -16,6 +16,8 @@ import (
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
+	"github.com/reekoheek/aim/pkg/router/systemone"
+	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
 )
 
@@ -77,12 +79,15 @@ func run(cmd *cobra.Command, args []string) error {
 		l.Info("configured model", slog.String("id", modelID))
 	}
 
-	router := chatcompletion.New(cfg, l)
+	llamaServers := llamaserver.NewMonitor()
+	chatCompletionRouter := chatcompletion.New(cfg, l, llamaServers)
+	systemOneRouter := systemone.New(cfg, l, llamaServers)
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", router.Handler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.ChatCompletionsPath, chatCompletionRouter.Handler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.SystemOnePath, systemOneRouter.Handler)
 
 	server := &http.Server{
 		Addr:    addr,
@@ -119,7 +124,7 @@ func run(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)
-		router.Close(ctx)
+		llamaServers.Close(ctx)
 	}()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

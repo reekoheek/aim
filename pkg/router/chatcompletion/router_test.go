@@ -53,17 +53,24 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 			body:        `{"model":"orphan"}`,
 			wantMessage: `provider "gone" not found in config`,
 		},
+		{
+			name:        "systemone model",
+			body:        `{"model":"decider"}`,
+			wantMessage: `model "decider" is type systemone, use /v1/systemone`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{
 				Models: map[string]config.ModelEntry{
-					"orphan": {Type: config.ModelTypeChatCompletion, Provider: "gone", Model: "upstream-model"},
+					"orphan":  {Type: config.ModelTypeChatCompletion, Provider: "gone", Model: "upstream-model"},
+					"decider": {Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
 				},
+				Providers: map[string]config.ProviderEntry{"p": {BaseURL: "http://127.0.0.1:1"}},
 			}
 
-			recorder := serveCompletion(New(cfg, logger.New("ERROR")), tt.body)
+			recorder := serveCompletion(New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()), tt.body)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -118,7 +125,7 @@ func TestHandlerFollowsModelConfigOnEveryRequest(t *testing.T) {
 				Models:    map[string]config.ModelEntry{},
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: upstream.URL}},
 			}
-			router := New(cfg, logger.New("ERROR"))
+			router := New(cfg, logger.New("ERROR"), llamaserver.NewMonitor())
 
 			var got []string
 			for _, upstreamModel := range tt.upstreamModels {
@@ -165,7 +172,7 @@ func TestHandlerForwardsEveryHeaderValue(t *testing.T) {
 			}
 
 			recorder := httptest.NewRecorder()
-			New(cfg, logger.New("ERROR")).Handler(recorder, req)
+			New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -191,7 +198,7 @@ func TestHandlerWritesBodyErrorsAsJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			New(&config.Config{}, logger.New("ERROR")).Handler(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", tt.body))
+			New(&config.Config{}, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", tt.body))
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -233,6 +240,11 @@ func TestNewStrategy(t *testing.T) {
 			want:  &llamaserver.Strategy{},
 		},
 		{
+			name:    "systemone belongs to its own endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
+			wantErr: `model "m" is type systemone, use /v1/systemone`,
+		},
+		{
 			name:    "unsupported type",
 			entry:   config.ModelEntry{Type: "provider"},
 			wantErr: `unsupported type "provider"`,
@@ -241,7 +253,7 @@ func TestNewStrategy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := New(&config.Config{}, logger.New("ERROR")).newStrategy("m", tt.entry)
+			got, err := New(&config.Config{}, logger.New("ERROR"), llamaserver.NewMonitor()).newStrategy("m", tt.entry)
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("error %v, want %q", err, tt.wantErr)

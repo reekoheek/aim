@@ -63,7 +63,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		req.Body = body
 	}
 
-	targetURL := srv.URL() + "/v1/chat/completions"
+	targetURL := srv.URL() + strategy.ChatCompletionsPath
 	s.forwarder.Forward(ctx, w, req, targetURL, nil)
 }
 
