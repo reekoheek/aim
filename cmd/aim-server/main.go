@@ -16,6 +16,7 @@ import (
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
+	"github.com/reekoheek/aim/pkg/router/messages"
 	"github.com/reekoheek/aim/pkg/router/systemone"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
@@ -82,12 +83,15 @@ func run(cmd *cobra.Command, args []string) error {
 	llamaServers := llamaserver.NewMonitor()
 	chatCompletionRouter := chatcompletion.New(cfg, l, llamaServers)
 	systemOneRouter := systemone.New(cfg, l, llamaServers)
+	messagesRouter := messages.New(cfg, l, llamaServers)
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(http.MethodPost+" "+strategy.ChatCompletionsPath, chatCompletionRouter.Handler)
 	mux.HandleFunc(http.MethodPost+" "+strategy.SystemOnePath, systemOneRouter.Handler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.MessagesPath, messagesRouter.Handler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.CountTokensPath, messagesRouter.CountTokensHandler)
 
 	server := &http.Server{
 		Addr:    addr,

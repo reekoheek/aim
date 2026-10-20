@@ -305,3 +305,117 @@ func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleForwardsToEndpointPath(t *testing.T) {
+	tests := []struct {
+		name         string
+		newStrategy  func(cfg *config.Config, m *Monitor) *Strategy
+		wantResponse string
+	}{
+		{
+			name: "chat completions",
+			newStrategy: func(cfg *config.Config, m *Monitor) *Strategy {
+				return NewStrategy(cfg, testLogger, m, "a")
+			},
+			wantResponse: fakeChatCompletionResponse,
+		},
+		{
+			name: "messages",
+			newStrategy: func(cfg *config.Config, m *Monitor) *Strategy {
+				return NewMessagesStrategy(cfg, testLogger, m, "a")
+			},
+			wantResponse: fakeMessagesResponse,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			m := newTestMonitor(t)
+			req := &strategy.Request{
+				Body:    []byte(`{"model":"a"}`),
+				Headers: http.Header{"X-Claude-Code-Session-Id": {"cc"}},
+			}
+
+			recorder := httptest.NewRecorder()
+			tt.newStrategy(cfg, m).Handle(context.Background(), recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
+			}
+			if got := recorder.Body.String(); got != tt.wantResponse {
+				t.Errorf("response %s, want %s", got, tt.wantResponse)
+			}
+			if got := currentSlots(m).slots[0].session; got != "cc" {
+				t.Errorf("slot session %q, want %q", got, "cc")
+			}
+		})
+	}
+}
+
+func TestMessagesHandlePinsSlot(t *testing.T) {
+	cfg := newFakeLlamaConfig(t, 0, "a")
+	m := newTestMonitor(t)
+	req := &strategy.Request{
+		Body:    []byte(`{"model":"a","fake_echo":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`),
+		Headers: http.Header{"X-Session-Affinity": {"session"}},
+	}
+
+	recorder := httptest.NewRecorder()
+	NewMessagesStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
+	}
+	var upstream map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &upstream); err != nil {
+		t.Fatalf("upstream body %s is not JSON: %v", recorder.Body, err)
+	}
+	for field, want := range map[string]string{
+		"id_slot":      `0`,
+		"cache_prompt": `true`,
+		"max_tokens":   `16`,
+		"messages":     `[{"role":"user","content":"hi"}]`,
+	} {
+		if got := string(upstream[field]); got != want {
+			t.Errorf("upstream %s = %s, want %s", field, got, want)
+		}
+	}
+}
+
+func TestHandleWritesErrorsWithRequestErrorWriter(t *testing.T) {
+	tests := []struct {
+		name     string
+		errors   strategy.ErrorWriter
+		wantBody string
+	}{
+		{
+			name:     "OpenAI shape",
+			errors:   strategy.OpenAIErrors{},
+			wantBody: `{"error":{"message":"request body must be a JSON object","type":"invalid_request_error","param":null,"code":null}}`,
+		},
+		{
+			name:     "Anthropic shape",
+			errors:   strategy.AnthropicErrors{},
+			wantBody: `{"type":"error","error":{"type":"invalid_request_error","message":"request body must be a JSON object"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			m := newTestMonitor(t)
+			req := &strategy.Request{Body: []byte(`hello`), Errors: tt.errors}
+
+			recorder := httptest.NewRecorder()
+			NewMessagesStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
+			}
+			if got := recorder.Body.String(); got != tt.wantBody {
+				t.Errorf("body %s, want %s", got, tt.wantBody)
+			}
+		})
+	}
+}

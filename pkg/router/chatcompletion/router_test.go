@@ -58,6 +58,11 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 			body:        `{"model":"decider"}`,
 			wantMessage: `model "decider" is type systemone, use /v1/systemone`,
 		},
+		{
+			name:        "anthropic model",
+			body:        `{"model":"claude"}`,
+			wantMessage: `model "claude" is type anthropic, use /v1/messages`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -66,6 +71,7 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 				Models: map[string]config.ModelEntry{
 					"orphan":  {Type: config.ModelTypeChatCompletion, Provider: "gone", Model: "upstream-model"},
 					"decider": {Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
+					"claude":  {Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
 				},
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: "http://127.0.0.1:1"}},
 			}
@@ -245,6 +251,11 @@ func TestNewStrategy(t *testing.T) {
 			wantErr: `model "m" is type systemone, use /v1/systemone`,
 		},
 		{
+			name:    "anthropic belongs to the messages endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
+			wantErr: `model "m" is type anthropic, use /v1/messages`,
+		},
+		{
 			name:    "unsupported type",
 			entry:   config.ModelEntry{Type: "provider"},
 			wantErr: `unsupported type "provider"`,
@@ -265,6 +276,43 @@ func TestNewStrategy(t *testing.T) {
 			}
 			if gotType, wantType := fmt.Sprintf("%T", got), fmt.Sprintf("%T", tt.want); gotType != wantType {
 				t.Errorf("strategy %s, want %s", gotType, wantType)
+			}
+		})
+	}
+}
+
+func TestHandlerForwardsQuery(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "no query", target: "/v1/chat/completions", want: ""},
+		{name: "query", target: "/v1/chat/completions?beta=true", want: "beta=true"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			received := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"choices":[]}`))
+			}))
+			t.Cleanup(upstream.Close)
+
+			cfg := &config.Config{
+				Models:    map[string]config.ModelEntry{"m": {Type: config.ModelTypeChatCompletion, Provider: "p", Model: "upstream-model"}},
+				Providers: map[string]config.ProviderEntry{"p": {BaseURL: upstream.URL}},
+			}
+			recorder := httptest.NewRecorder()
+			New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(`{"model":"m"}`)))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
+			}
+			if got := <-received; got != tt.want {
+				t.Errorf("upstream query %q, want %q", got, tt.want)
 			}
 		})
 	}

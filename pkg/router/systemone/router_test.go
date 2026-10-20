@@ -101,6 +101,12 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 			wantParam:   modelParam,
 			wantMessage: `model "chat" is type chat-completion, use /v1/chat/completions`,
 		},
+		{
+			name:        "anthropic model",
+			body:        `{"model":"claude","questions":` + validQuestions + `}`,
+			wantParam:   modelParam,
+			wantMessage: `model "claude" is type anthropic, use /v1/messages`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -110,6 +116,7 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 					"decider": {Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
 					"orphan":  {Type: config.ModelTypeSystemOne, Provider: "gone", Model: "upstream-decider"},
 					"chat":    {Type: config.ModelTypeChatCompletion, Provider: "p", Model: "upstream-chat"},
+					"claude":  {Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
 					"local": {
 						Type:     config.ModelTypeLlamaServer,
 						LlamaCpp: &config.LlamaCppEntry{Bin: filepath.Join(t.TempDir(), "missing-llama-server")},
@@ -256,12 +263,17 @@ func TestNewStrategy(t *testing.T) {
 		{
 			name:  "llama-server",
 			entry: config.ModelEntry{Type: config.ModelTypeLlamaServer},
-			want:  &llamaserver.SystemOneStrategy{},
+			want:  &llamaserver.SlotlessStrategy{},
 		},
 		{
 			name:    "chat-completion belongs to its own endpoint",
 			entry:   config.ModelEntry{Type: config.ModelTypeChatCompletion, Provider: "p", Model: "upstream-chat"},
 			wantErr: `model "m" is type chat-completion, use /v1/chat/completions`,
+		},
+		{
+			name:    "anthropic belongs to the messages endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
+			wantErr: `model "m" is type anthropic, use /v1/messages`,
 		},
 		{
 			name:    "unsupported type",

@@ -31,6 +31,7 @@ const (
 	ModelTypeChatCompletion = "chat-completion"
 	ModelTypeSystemOne      = "systemone"
 	ModelTypeLlamaServer    = "llama-server"
+	ModelTypeAnthropic      = "anthropic"
 )
 
 type reservedFlags struct {
@@ -128,7 +129,7 @@ func (c *Config) ResolveModel(selector string) (ModelEntry, error) {
 		return ModelEntry{}, fmt.Errorf("model %q not found in config", selector)
 	}
 	switch entry.Type {
-	case ModelTypeChatCompletion, ModelTypeSystemOne:
+	case ModelTypeChatCompletion, ModelTypeSystemOne, ModelTypeAnthropic:
 		if err := c.validateChatCompletion(selector, entry); err != nil {
 			return ModelEntry{}, err
 		}

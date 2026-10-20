@@ -208,3 +208,63 @@ func TestSystemOneHandleWritesErrorsAsJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestCountTokensHandleForwardsWithoutSlot(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers http.Header
+	}{
+		{name: "claude code session", headers: http.Header{"X-Claude-Code-Session-Id": {"cc"}}},
+		{name: "without session", headers: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			m := newTestMonitor(t)
+			req := &strategy.Request{Body: []byte(`{"model":"a","messages":[]}`), Headers: tt.headers}
+
+			recorder := httptest.NewRecorder()
+			NewCountTokensStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
+			}
+			if got := recorder.Body.String(); got != fakeCountTokensResponse {
+				t.Errorf("response %s, want %s", got, fakeCountTokensResponse)
+			}
+			for _, slot := range currentSlots(m).slots {
+				if slot.session != "" || slot.busy || slot.unsaved {
+					t.Errorf("slot %d session %q busy %v unsaved %v, want untouched", slot.id, slot.session, slot.busy, slot.unsaved)
+				}
+			}
+		})
+	}
+}
+
+func TestCountTokensHandleWritesAnthropicErrors(t *testing.T) {
+	cfg := newFakeLlamaConfig(t, 0, "broken")
+	cfg.Models["broken"].LlamaCpp.Bin = filepath.Join(t.TempDir(), "missing-llama-server")
+	m := newTestMonitor(t)
+	req := &strategy.Request{Body: []byte(`{"model":"broken"}`), Errors: strategy.AnthropicErrors{}}
+
+	recorder := httptest.NewRecorder()
+	NewCountTokensStrategy(cfg, testLogger, m, "broken").Handle(context.Background(), recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("status %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	var got struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body %s is not JSON: %v", recorder.Body, err)
+	}
+	if got.Type != "error" || got.Error.Type != "api_error" || !strings.HasPrefix(got.Error.Message, errStartFailed.Error()+": ") {
+		t.Errorf("error %+v, want an api_error starting with %q", got, errStartFailed.Error())
+	}
+}

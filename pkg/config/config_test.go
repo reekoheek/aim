@@ -795,6 +795,58 @@ models:
 			wantErr: `provider "gone" not found in config`,
 		},
 		{
+			name:     "anthropic",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: anthropic
+    provider: p
+    model: claude-remote
+providers:
+  p:
+    base_url: https://api.anthropic.com
+`,
+			want: ModelEntry{Type: ModelTypeAnthropic, Provider: "p", Model: "claude-remote"},
+		},
+		{
+			name:     "anthropic without provider",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: anthropic
+    model: claude-remote
+`,
+			wantErr: `model "m" has empty provider`,
+		},
+		{
+			name:     "anthropic without model name",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: anthropic
+    provider: p
+providers:
+  p:
+    base_url: https://api.anthropic.com
+`,
+			wantErr: `model "m" has empty model name`,
+		},
+		{
+			name:     "anthropic with provider missing from config",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: anthropic
+    provider: gone
+    model: claude-remote
+`,
+			wantErr: `provider "gone" not found in config`,
+		},
+		{
 			name:     "llama-server",
 			selector: "m",
 			yaml: `

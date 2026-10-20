@@ -460,6 +460,8 @@ const (
 	fakeLlamaServerOrphanInterval = 100 * time.Millisecond
 	fakeChatCompletionResponse    = `{"choices":[]}`
 	fakeSystemOneResponse         = `{"answers":{}}`
+	fakeMessagesResponse          = `{"type":"message","content":[]}`
+	fakeCountTokensResponse       = `{"input_tokens":3}`
 )
 
 func TestMain(m *testing.M) {
@@ -487,6 +489,8 @@ func runFakeLlamaServer(args []string) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {})
 	mux.HandleFunc("POST "+strategy.ChatCompletionsPath, fakeInference(fakeChatCompletionResponse))
 	mux.HandleFunc("POST "+strategy.SystemOnePath, fakeInference(fakeSystemOneResponse))
+	mux.HandleFunc("POST "+strategy.MessagesPath, fakeInference(fakeMessagesResponse))
+	mux.HandleFunc("POST "+strategy.CountTokensPath, fakeInference(fakeCountTokensResponse))
 	mux.HandleFunc("POST /slots/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Filename string `json:"filename"`
