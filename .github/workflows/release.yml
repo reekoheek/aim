@@ -19,6 +19,9 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: linux
+            goarch: ppc64le
+            goppc64: power9
           - goos: darwin
             goarch: amd64
           - goos: darwin
@@ -38,6 +41,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOPPC64: ${{ matrix.goppc64 }}
           CGO_ENABLED: "0"
           VERSION: ${{ github.ref_name }}
         run: |
