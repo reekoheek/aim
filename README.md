@@ -1,6 +1,6 @@
 # aim
 
-AI Management Server — lightweight LLM proxy with multi-model support. Forwards requests to OpenAI-compatible APIs.
+AI Management Server — lightweight LLM proxy with multi-model support. Forwards requests to OpenAI- and Anthropic-compatible APIs and to llama.cpp's llama-server.
 
 ## Quick Start
 
@@ -28,14 +28,21 @@ models:
     type: systemone
     provider: banyu-minipc
     model: julia-1
+  anthropic/claude-sonnet:
+    type: anthropic
+    provider: anthropic
+    model: claude-sonnet-5-5
 
 providers:
   banyu-minipc:
     base_url: http://banyu-minipc:8080
     api_key: sk-xxx
   openai:
-    base_url: https://api.openai.com/v1
+    base_url: https://api.openai.com
     api_key: sk-your-key
+  anthropic:
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-your-key
 
 server:
   host: 0.0.0.0
@@ -46,7 +53,7 @@ server:
   idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m, 0 = never)
 ```
 
-Each llama-server model runs with `slots` KV cache slots (see below). A session (the `X-Session-Affinity` header; requests without it share one session) keeps its slot while it is in use. A session that has no slot takes an empty one, or else the least recently used free slot: that slot's session is saved as a `.bin` file under `save_slot_path`, and the incoming session is restored from its file. Every unsaved slot is also saved when llama-server stops. Requests wait while every slot is busy; a request whose session already holds a busy slot waits for that slot and is served before other waiting requests. A file counts as used when it is saved or when its session is requested again:
+Each llama-server model runs with `slots` KV cache slots (see below). A session (the `X-Session-Affinity` header, else Claude Code's `X-Claude-Code-Session-Id`; requests with neither share one session; a request that also carries Claude Code's `X-Claude-Code-Agent-Id` is a session of its own, so each subagent gets its own slot) keeps its slot while it is in use. A session that has no slot takes an empty one, or else the least recently used free slot: that slot's session is saved as a `.bin` file under `save_slot_path`, and the incoming session is restored from its file. Every unsaved slot is also saved when llama-server stops. Requests wait while every slot is busy; a request whose session already holds a busy slot waits for that slot and is served before other waiting requests. A file counts as used when it is saved or when its session is requested again:
 
 - files unused for longer than `slot_expiration` (a Go duration such as `1h`, `90m`) are deleted
 - only the `slot_max_files` most recently used files are kept; older ones are deleted right after a session switch
@@ -102,7 +109,7 @@ models:
 
 llama-server itself also applies the `[*]` section of `~/.config/llama.cpp/config.ini` (or `$XDG_CONFIG_HOME/llama.cpp/config.ini`, `/etc/llama.cpp/config.ini`) to every run, including the ones aim starts.
 
-`chat-completion` models are served on `/v1/chat/completions`, `systemone` models on `/v1/systemone`; both forward to the provider's `base_url` with the provider's `api_key` and the entry's `model`. A `llama-server` model is served on either endpoint (see below).
+`chat-completion` models are served on `/v1/chat/completions`, `systemone` models on `/v1/systemone` and `anthropic` models on `/v1/messages`; all three forward to the provider's `base_url` with the provider's `api_key` and the entry's `model`. A `llama-server` model is served on every endpoint (see below). The query string is passed upstream as-is, and so are the upstream's response headers.
 
 ## Usage
 
@@ -125,7 +132,7 @@ curl -X POST http://localhost:8080/v1/systemone \
 ```
 
 - `model` and a non-empty `questions` object are required; everything else is passed to llama-server as-is. There is no streaming.
-- the model must be `type: systemone` (forwarded to the provider) or `type: llama-server`; a `chat-completion` model is rejected, and so is a `systemone` model on `/v1/chat/completions`
+- the model must be `type: systemone` (forwarded to the provider) or `type: llama-server`; a `chat-completion` or `anthropic` model is rejected, and so is a `systemone` model on `/v1/chat/completions`
 - a `llama-server` decision model is a normal `llama-server` entry and takes turns with the chat models (one llama-server at a time). The slot cache is not used for it: llama-server picks the slots for decision requests itself, so `X-Session-Affinity` is ignored and nothing is saved or restored, and `slots: N` only sets how many questions run in parallel. A `llama-server` model that is not a decision model answers 501.
 
 ```yaml
@@ -138,6 +145,39 @@ models:
       -hf: ggml-org/Julia-1-GGUF:Q8_0
       -ngl: 999
 ```
+
+### Messages endpoint
+
+`/v1/messages` and `/v1/messages/count_tokens` serve the Anthropic Messages API:
+
+```bash
+curl -X POST http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model": "anthropic/claude-sonnet", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+- `model` is required; the body, the query string and every header (`anthropic-version`, `anthropic-beta`, …) are passed as-is
+- an `anthropic` model forwards to the provider's `base_url` + `/v1/messages` (or `/v1/messages/count_tokens`) with the entry's `model`; aim sends the provider's `api_key` as `x-api-key` and drops the client's `Authorization`
+- a `llama-server` model forwards to llama-server's own `/v1/messages` with the same slot cache as chat requests; `count_tokens` starts the model when needed but takes no slot. llama.cpp drops `id_slot` on `/v1/messages` until [ggml-org/llama.cpp#28554](https://github.com/ggml-org/llama.cpp/pull/28554) is merged, so with `slots` above 1 llama-server picks the slot itself and the slot cache saves and restores the wrong sessions more often (replies stay correct, they are just computed again). With `slots: 1` there is only one slot and the cache works fully.
+- `chat-completion` and `systemone` models are rejected, and so is an `anthropic` model on `/v1/chat/completions` and `/v1/systemone`
+- errors aim writes itself use Anthropic's shape, `{"type":"error","error":{"type":"invalid_request_error" or "api_error","message":"…"}}`; errors from the provider or from llama-server (which answers in OpenAI's shape) are passed through unchanged
+
+### With Claude Code
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_API_KEY=any-value              # aim sends the provider's key itself
+export ANTHROPIC_MODEL=qwen3.6-35b               # an aim model selector
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6-35b
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=128000     # the model's ctx; Claude Code assumes 200000 otherwise
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16000
+claude
+```
+
+- Claude Code asks for `ANTHROPIC_MODEL` and, for background calls, `ANTHROPIC_DEFAULT_HAIKU_MODEL`. Point both at the same `llama-server` model: aim runs one llama-server at a time, so a different haiku model makes it switch models for every background call.
+- Claude Code compacts the conversation only on Anthropic's "prompt is too long" error, which llama-server does not send. Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's `ctx` so it compacts before the context is full (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` moves that point, 100000 at the lowest), and keep `CLAUDE_CODE_MAX_OUTPUT_TOKENS` well below `ctx`.
+- with an `anthropic` provider that rejects Anthropic's newest beta fields, set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`
 
 ### With OpenAI SDK (Python)
 

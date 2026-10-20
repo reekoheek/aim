@@ -161,3 +161,115 @@ func TestForwardUpstreamHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestForwardQuery(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantQuery string
+	}{
+		{name: "no query", query: "", wantQuery: ""},
+		{name: "beta flag", query: "beta=true", wantQuery: "beta=true"},
+		{name: "several parameters", query: "beta=true&x=1", wantQuery: "beta=true&x=1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			received := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received <- r.URL.RawQuery
+			}))
+			t.Cleanup(upstream.Close)
+
+			req := &strategy.Request{Body: []byte(`{}`), Query: tt.query}
+			New(&http.Client{}, logger.New("ERROR")).Forward(context.Background(), httptest.NewRecorder(), req, upstream.URL+strategy.MessagesPath, nil)
+
+			if got := <-received; got != tt.wantQuery {
+				t.Errorf("query %q, want %q", got, tt.wantQuery)
+			}
+		})
+	}
+}
+
+func TestForwardResponseHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream bool
+		want   http.Header
+	}{
+		{
+			name: "end-to-end headers are copied",
+			want: http.Header{
+				"Request-Id":                         {"req_1"},
+				"Retry-After":                        {"7"},
+				"X-Should-Retry":                     {"true"},
+				"Anthropic-Ratelimit-Requests-Limit": {"50"},
+				"X-Request-Id":                       {"abc"},
+				"Content-Type":                       {"application/json"},
+				"Proxy-Authenticate":                 nil,
+			},
+		},
+		{
+			name:   "streamed response keeps end-to-end headers",
+			stream: true,
+			want: http.Header{
+				"Request-Id":         {"req_1"},
+				"Retry-After":        {"7"},
+				"Content-Type":       {"text/event-stream"},
+				"Proxy-Authenticate": nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Request-Id", "req_1")
+				w.Header().Set("Retry-After", "7")
+				w.Header().Set("X-Should-Retry", "true")
+				w.Header().Set("Anthropic-Ratelimit-Requests-Limit", "50")
+				w.Header().Set("X-Request-Id", "abc")
+				w.Header().Set("Proxy-Authenticate", "Basic")
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(upstream.Close)
+
+			recorder := httptest.NewRecorder()
+			req := &strategy.Request{Stream: tt.stream, Body: []byte(`{}`)}
+			New(&http.Client{}, logger.New("ERROR")).Forward(context.Background(), recorder, req, upstream.URL, nil)
+
+			for name, want := range tt.want {
+				if values := recorder.Header().Values(name); !slices.Equal(values, want) {
+					t.Errorf("%s = %q, want %q", name, values, want)
+				}
+			}
+		})
+	}
+}
+
+func TestForwardWritesErrorsWithRequestErrorWriter(t *testing.T) {
+	tests := []struct {
+		name     string
+		errors   strategy.ErrorWriter
+		wantBody string
+	}{
+		{name: "OpenAI shape by default", wantBody: `{"error":{"message":"failed to create upstream request","type":"server_error","param":null,"code":null}}`},
+		{name: "Anthropic shape", errors: strategy.AnthropicErrors{}, wantBody: `{"type":"error","error":{"type":"api_error","message":"failed to create upstream request"}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			req := &strategy.Request{Body: []byte(`{}`), Errors: tt.errors}
+			New(&http.Client{}, logger.New("ERROR")).Forward(context.Background(), recorder, req, unbuildableTargetURL, nil)
+
+			if recorder.Code != http.StatusInternalServerError {
+				t.Errorf("status %d, want %d", recorder.Code, http.StatusInternalServerError)
+			}
+			if got := recorder.Body.String(); got != tt.wantBody {
+				t.Errorf("body %s, want %s", got, tt.wantBody)
+			}
+		})
+	}
+}
