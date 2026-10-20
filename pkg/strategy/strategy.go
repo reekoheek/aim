@@ -11,11 +11,16 @@ import (
 const (
 	ChatCompletionsPath = "/v1/chat/completions"
 	SystemOnePath       = "/v1/systemone"
+	MessagesPath        = "/v1/messages"
+	CountTokensPath     = "/v1/messages/count_tokens"
 )
 
 const (
-	sessionAffinityHeader = "X-Session-Affinity"
-	noSession             = "-"
+	sessionAffinityHeader   = "X-Session-Affinity"
+	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+	claudeCodeAgentHeader   = "X-Claude-Code-Agent-Id"
+	sessionAgentSeparator   = "/"
+	noSession               = "-"
 )
 
 var ErrBodyNotJSONObject = errors.New("request body must be a JSON object")
@@ -28,13 +33,28 @@ type Request struct {
 	Stream  bool
 	Body    []byte
 	Headers http.Header
+	Query   string
+	Errors  ErrorWriter
 }
 
 func (r *Request) SessionID() string {
-	if id := strings.TrimSpace(r.Headers.Get(sessionAffinityHeader)); id != "" {
-		return id
+	session := firstHeaderValue(r.Headers, sessionAffinityHeader, claudeCodeSessionHeader)
+	if session == "" {
+		session = noSession
 	}
-	return noSession
+	if agent := strings.TrimSpace(r.Headers.Get(claudeCodeAgentHeader)); agent != "" {
+		return session + sessionAgentSeparator + agent
+	}
+	return session
+}
+
+func firstHeaderValue(headers http.Header, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *Request) BodyFields() (map[string]json.RawMessage, error) {
@@ -43,4 +63,12 @@ func (r *Request) BodyFields() (map[string]json.RawMessage, error) {
 		return nil, ErrBodyNotJSONObject
 	}
 	return fields, nil
+}
+
+func (r *Request) WriteError(w http.ResponseWriter, status int, errorType string, message string) {
+	errorWriter := r.Errors
+	if errorWriter == nil {
+		errorWriter = OpenAIErrors{}
+	}
+	errorWriter.WriteError(w, status, errorType, message)
 }

@@ -34,21 +34,21 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 	provider, err := s.cfg.GetProvider(s.provider)
 	if err != nil {
 		s.logger.LogError("failed to get provider", err, slog.String("provider", s.provider))
-		strategy.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, err.Error())
+		req.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, err.Error())
 		return
 	}
 
 	fields, err := req.BodyFields()
 	if err != nil {
 		s.logger.LogError("invalid request body", err, slog.String("provider", s.provider))
-		strategy.WriteError(w, http.StatusBadRequest, strategy.ErrorTypeInvalidRequest, err.Error())
+		req.WriteError(w, http.StatusBadRequest, strategy.ErrorTypeInvalidRequest, err.Error())
 		return
 	}
 	fields["model"], _ = json.Marshal(s.model)
 	newBody, err := json.Marshal(fields)
 	if err != nil {
 		s.logger.LogError("failed to encode upstream request body", err)
-		strategy.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, "failed to encode upstream request body")
+		req.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, "failed to encode upstream request body")
 		return
 	}
 	req.Body = newBody

@@ -74,6 +74,8 @@ func (r *Router) Handler(w http.ResponseWriter, req *http.Request) {
 	strategyReq := &strategy.Request{
 		Body:    body,
 		Headers: req.Header,
+		Query:   req.URL.RawQuery,
+		Errors:  strategy.OpenAIErrors{},
 	}
 
 	r.logger.LogRequest(req.Method, req.URL.Path, systemOneReq.Model, req.RemoteAddr)
@@ -90,6 +92,8 @@ func (r *Router) newStrategy(selector string, entry config.ModelEntry) (strategy
 		return llamaserver.NewSystemOneStrategy(r.cfg, r.logger, r.llamaServers, selector), nil
 	case config.ModelTypeChatCompletion:
 		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.ChatCompletionsPath)
+	case config.ModelTypeAnthropic:
+		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.MessagesPath)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", entry.Type)
 	}

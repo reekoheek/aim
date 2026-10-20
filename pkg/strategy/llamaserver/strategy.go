@@ -19,15 +19,25 @@ type Strategy struct {
 	monitor   *Monitor
 	forwarder *forwarder.Forwarder
 	selector  string
+	path      string
 }
 
 func NewStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string) *Strategy {
+	return newStrategy(cfg, l, monitor, selector, strategy.ChatCompletionsPath)
+}
+
+func NewMessagesStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string) *Strategy {
+	return newStrategy(cfg, l, monitor, selector, strategy.MessagesPath)
+}
+
+func newStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string, path string) *Strategy {
 	return &Strategy{
 		cfg:       cfg,
 		logger:    l,
 		monitor:   monitor,
 		forwarder: forwarder.New(client, l),
 		selector:  selector,
+		path:      path,
 	}
 }
 
@@ -35,14 +45,14 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 	fields, err := req.BodyFields()
 	if err != nil {
 		s.logger.LogError("invalid request body", err, slog.String("selector", s.selector))
-		strategy.WriteError(w, http.StatusBadRequest, strategy.ErrorTypeInvalidRequest, err.Error())
+		req.WriteError(w, http.StatusBadRequest, strategy.ErrorTypeInvalidRequest, err.Error())
 		return
 	}
 
 	srv, slots, err := s.monitor.Acquire(ctx, s.cfg, s.logger, s.selector)
 	if err != nil {
 		s.logger.LogError("failed to acquire llama server", err, slog.String("selector", s.selector))
-		strategy.WriteError(w, acquireErrorStatus(err), strategy.ErrorTypeServer, err.Error())
+		req.WriteError(w, acquireErrorStatus(err), strategy.ErrorTypeServer, err.Error())
 		return
 	}
 
@@ -53,7 +63,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		slotID, release, err := slots.acquire(ctx, session)
 		if err != nil {
 			s.logger.LogError("failed to acquire slot", err, slog.String("session", session))
-			strategy.WriteError(w, http.StatusServiceUnavailable, strategy.ErrorTypeServer, err.Error())
+			req.WriteError(w, http.StatusServiceUnavailable, strategy.ErrorTypeServer, err.Error())
 			return
 		}
 		defer release()
@@ -63,7 +73,7 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		req.Body = body
 	}
 
-	targetURL := srv.URL() + strategy.ChatCompletionsPath
+	targetURL := srv.URL() + s.path
 	s.forwarder.Forward(ctx, w, req, targetURL, nil)
 }
 

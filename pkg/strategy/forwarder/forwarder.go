@@ -38,10 +38,14 @@ func New(client *http.Client, l *logger.Logger) *Forwarder {
 func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *strategy.Request, targetURL string, extraHeaders map[string]string) {
 	start := time.Now()
 
+	if req.Query != "" {
+		targetURL += "?" + req.Query
+	}
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		f.logger.LogError("failed to create upstream request", err, slog.String("url", targetURL))
-		strategy.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, "failed to create upstream request")
+		req.WriteError(w, http.StatusInternalServerError, strategy.ErrorTypeServer, "failed to create upstream request")
 		return
 	}
 
@@ -63,7 +67,7 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 	httpResp, err := f.client.Do(httpReq)
 	if err != nil {
 		f.logger.LogError("upstream request failed", err, slog.String("url", targetURL))
-		strategy.WriteError(w, http.StatusBadGateway, strategy.ErrorTypeUpstream, "upstream error: "+err.Error())
+		req.WriteError(w, http.StatusBadGateway, strategy.ErrorTypeUpstream, "upstream error: "+err.Error())
 		return
 	}
 	defer httpResp.Body.Close()
@@ -76,7 +80,7 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		f.logger.LogError("failed to read upstream response", err)
-		strategy.WriteError(w, http.StatusBadGateway, strategy.ErrorTypeServer, "failed to read upstream response")
+		req.WriteError(w, http.StatusBadGateway, strategy.ErrorTypeServer, "failed to read upstream response")
 		return
 	}
 
@@ -87,13 +91,25 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 		slog.String("body", string(body)),
 	)
 
-	w.Header().Set("Content-Type", httpResp.Header.Get("Content-Type"))
-	w.Header().Set("X-Request-Id", httpResp.Header.Get("X-Request-Id"))
+	copyResponseHeaders(w.Header(), httpResp.Header)
 	w.WriteHeader(httpResp.StatusCode)
 	w.Write(body)
 }
 
+func copyResponseHeaders(dst http.Header, src http.Header) {
+	for k, values := range src {
+		if hopByHop[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(k, v)
+		}
+	}
+}
+
 func (f *Forwarder) streamResponse(w http.ResponseWriter, httpResp *http.Response, start time.Time) {
+	copyResponseHeaders(w.Header(), httpResp.Header)
+	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
