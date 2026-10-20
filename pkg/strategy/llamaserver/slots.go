@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -28,8 +27,8 @@ import (
 const (
 	slotSavePathFlag      = "--slot-save-path"
 	slotFileExtension     = ".bin"
-	slotFileSeparator     = "--"
-	sessionDigestLength   = 16
+	slotDigestSeparator   = "\x00"
+	slotDigestLength      = 16
 	maxSlotSweepInterval  = time.Hour
 	slotPruneReasonExpiry = "expired"
 	slotPruneReasonLimit  = "over limit"
@@ -38,8 +37,6 @@ const (
 var errServerExited = errors.New("llama.cpp server has exited")
 
 var slotClient = &http.Client{Timeout: time.Minute}
-
-var unsafeFileNameChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 type cacheSlot struct {
 	id       int
@@ -362,16 +359,12 @@ func (c *slotCache) restore(slotID int, sessionID string) {
 }
 
 func (c *slotCache) file(sessionID string) string {
-	return sanitizeFileName(c.selector) + slotFileSeparator + sessionDigest(sessionID) + slotFileExtension
+	return slotDigest(c.selector, sessionID) + slotFileExtension
 }
 
-func sessionDigest(sessionID string) string {
-	sum := sha256.Sum256([]byte(sessionID))
-	return hex.EncodeToString(sum[:])[:sessionDigestLength]
-}
-
-func sanitizeFileName(id string) string {
-	return unsafeFileNameChars.ReplaceAllString(id, "--")
+func slotDigest(selector string, sessionID string) string {
+	sum := sha256.Sum256([]byte(selector + slotDigestSeparator + sessionID))
+	return hex.EncodeToString(sum[:])[:slotDigestLength]
 }
 
 func (c *slotCache) action(slotID int, action string, file string) error {

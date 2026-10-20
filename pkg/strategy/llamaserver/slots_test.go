@@ -1012,16 +1012,16 @@ func TestWithSlotSavePath(t *testing.T) {
 	}
 }
 
-func TestSlotFileNamesModelAndSession(t *testing.T) {
+func TestSlotFileHashesModelAndSession(t *testing.T) {
 	tests := []struct {
 		selector string
 		session  string
 		want     string
 	}{
-		{"qwen3.6-35b", "simple", "qwen3.6-35b--a7a39b72f29718e6.bin"},
-		{"qwen3.6-35b", "a/b", "qwen3.6-35b--c14cddc033f64b9d.bin"},
-		{"qwen3.6-35b", "a:b", "qwen3.6-35b--6783a31eabf68ccc.bin"},
-		{"org/model", "simple", "org--model--a7a39b72f29718e6.bin"},
+		{"qwen3.6-35b", "simple", "45d2fafded96e032.bin"},
+		{"qwen3.6-35b", "a/b", "8eef54311a70942e.bin"},
+		{"qwen3.6-35b", "a:b", "5fbdddc239b704b9.bin"},
+		{"org/model", "simple", "482615c1f475d102.bin"},
 	}
 
 	for _, tt := range tests {
@@ -1048,7 +1048,7 @@ func TestSlotFileSeparatesModelsAndSessions(t *testing.T) {
 		{"same architecture models", slotOwner{"qwen3.6-35b", "session"}, slotOwner{"cyber-tiel", "session"}},
 		{"selector and session split differently", slotOwner{"org/model", "simple"}, slotOwner{"org", "model/simple"}},
 		{"sessions differing only in unsafe characters", slotOwner{"m", "a/b"}, slotOwner{"m", "a:b"}},
-	}
+		{"models differing only in unsafe characters", slotOwner{"org/model", "session"}, slotOwner{"org--model", "session"}}}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1066,15 +1066,6 @@ func TestSlotFileStaysPathSafe(t *testing.T) {
 		name := (&slotCache{selector: "org/model"}).file(session)
 		if strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, slotFileExtension) {
 			t.Errorf("file(%q) = %q is not a plain %s file name", session, name, slotFileExtension)
-		}
-	}
-}
-
-func TestSanitizeFileNameStaysPathSafe(t *testing.T) {
-	for _, id := range []string{"a/b", "a\\b", "../escape", "a b/c", "hijau:12"} {
-		name := sanitizeFileName(id)
-		if strings.ContainsAny(name, `/\`) {
-			t.Errorf("sanitizeFileName(%q) = %q still contains path separators", id, name)
 		}
 	}
 }
