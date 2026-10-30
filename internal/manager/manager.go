@@ -78,9 +78,9 @@ func (m *Manager) Install(ctx context.Context, options InstallOptions) error {
 		return m.missingAssetError(ctx, resolution.Build, variant)
 	}
 	folder := m.Descriptor.FolderName(resolution.Build, variant)
-	m.printf(">> %s (%s) %s\n", describeResolution(resolution), variant, asset.Name)
+	m.printf("%s (%s) %s\n", describeResolution(resolution), variant, asset.Name)
 	if options.DryRun {
-		m.printf(">> dry-run: would install %s from\n   %s\n", folder, asset.URL)
+		m.printf("dry-run: would install %s from\n   %s\n", folder, asset.URL)
 		return nil
 	}
 
@@ -91,10 +91,10 @@ func (m *Manager) Install(ctx context.Context, options InstallOptions) error {
 	installed := m.Store.hasMainBinary(folder)
 	switch {
 	case installed && !options.Force && folder == current && !options.NoUse:
-		m.printf(">> already on %s; use -f to re-download\n", folder)
+		m.printf("already on %s; use -f to re-download\n", folder)
 		return nil
 	case installed && !options.Force:
-		m.printf(">> %s already downloaded\n", folder)
+		m.printf("%s already downloaded\n", folder)
 	default:
 		if err := m.download(ctx, asset, resolution.Build, folder); err != nil {
 			return err
@@ -105,21 +105,15 @@ func (m *Manager) Install(ctx context.Context, options InstallOptions) error {
 	}
 
 	if options.NoUse {
-		m.printf(">> downloaded to %s (not activated)\n", folder)
+		m.printf("downloaded to %s (not activated)\n", folder)
 	} else if err := m.activate(folder); err != nil {
 		return err
 	}
 	pruned, err := m.Store.Prune(variant, options.Keep, folder)
 	for _, name := range pruned {
-		m.printf(">> pruned %s\n", name)
+		m.printf("pruned %s\n", name)
 	}
-	if err != nil {
-		return err
-	}
-	if !options.NoUse {
-		m.printRestartHint()
-	}
-	return nil
+	return err
 }
 
 func describeResolution(resolution Resolution) string {
@@ -169,11 +163,11 @@ func (m *Manager) download(ctx context.Context, asset backend.Asset, build strin
 	defer os.RemoveAll(staging)
 
 	archivePath := filepath.Join(staging, archiveFileName)
-	m.printf(">> downloading %s (%s)\n", asset.Name, HumanSize(asset.Size))
+	m.printf("downloading %s (%s)\n", asset.Name, HumanSize(asset.Size))
 	if err := m.downloadTo(ctx, asset.URL, archivePath); err != nil {
 		return err
 	}
-	m.printf(">> extracting\n")
+	m.printf("extracting\n")
 	extracted := filepath.Join(staging, extractFolderName)
 	if err := Extract(archivePath, asset.Format, m.Descriptor.StripPrefixFor(build), extracted); err != nil {
 		return fmt.Errorf("extract %s: %w", asset.Name, err)
@@ -205,26 +199,22 @@ func (m *Manager) activate(folder string) error {
 	if err := m.Store.Activate(folder); err != nil {
 		return err
 	}
-	m.printf(">> current -> %s\n", folder)
+	m.printf("current -> %s\n", folder)
 	if !m.Store.UseSymlinks {
-		m.printf(">> %s: %s\n", m.Descriptor.MainBinary, m.Store.MainBinaryPath(folder))
+		m.printf("%s: %s\n", m.Descriptor.MainBinary, m.Store.MainBinaryPath(folder))
 		return nil
 	}
 	report, err := m.Linker.Relink(m.Store.BuildPath(folder))
 	for _, name := range report.Skipped {
-		m.printf(">> skipped %s: %s is a real file\n", name, filepath.Join(m.Linker.BinDir, name))
+		m.printf("skipped %s: %s is a real file\n", name, filepath.Join(m.Linker.BinDir, name))
 	}
 	if err != nil {
 		return err
 	}
 	if len(report.Linked) > 0 {
-		m.printf(">> linked %d binaries into %s\n", len(report.Linked), m.Linker.BinDir)
+		m.printf("linked %d binaries into %s\n", len(report.Linked), m.Linker.BinDir)
 	}
 	return nil
-}
-
-func (m *Manager) printRestartHint() {
-	m.printf(">> no restart needed: aim serve picks up the new %s the next time it starts the backend\n", m.Descriptor.MainBinary)
 }
 
 type ListOptions struct {
@@ -362,14 +352,10 @@ func (m *Manager) Use(argument string) error {
 		return m.withInstallHint(err, argument)
 	}
 	if target.Folder == current {
-		m.printf(">> %s is already current\n", target.Folder)
+		m.printf("%s is already current\n", target.Folder)
 		return nil
 	}
-	if err := m.activate(target.Folder); err != nil {
-		return err
-	}
-	m.printRestartHint()
-	return nil
+	return m.activate(target.Folder)
 }
 
 func (m *Manager) withInstallHint(err error, argument string) error {
@@ -448,7 +434,7 @@ func (m *Manager) Remove(arguments []string, confirmed bool) error {
 		}
 	}
 	for _, target := range targets {
-		m.printf(">> deleting %s\n", target.Folder)
+		m.printf("deleting %s\n", target.Folder)
 		if err := m.Store.Remove(target); err != nil {
 			return err
 		}

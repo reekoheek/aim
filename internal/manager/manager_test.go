@@ -102,11 +102,12 @@ func TestManagerInstall(t *testing.T) {
 		wantDownloads int
 	}{
 		{
-			name:        "latest stable resolves through nightly-tag",
-			options:     InstallOptions{Keep: DefaultKeep},
-			wantCurrent: "b500-vulkan",
-			wantFolders: []string{"b500-vulkan"},
-			wantOutput:  []string{"v2.0.0 -> b500", "current -> b500-vulkan", "no restart needed"},
+			name:         "latest stable resolves through nightly-tag",
+			options:      InstallOptions{Keep: DefaultKeep},
+			wantCurrent:  "b500-vulkan",
+			wantFolders:  []string{"b500-vulkan"},
+			wantOutput:   []string{"v2.0.0 -> b500", "current -> b500-vulkan"},
+			wantNoOutput: []string{"restart"},
 		},
 		{
 			name:         "dry run prints url only",
