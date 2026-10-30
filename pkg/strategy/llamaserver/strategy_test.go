@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 )
 
 const handleTimeout = 15 * time.Second
 
-func handleAsync(m *Monitor, cfg *config.Config, model string, session string, delay time.Duration) <-chan int {
-	s := NewStrategy(cfg, testLogger, m, model)
+func handleAsync(supervisor *lane.Supervisor, cfg *config.Config, model string, session string, delay time.Duration) <-chan int {
+	s := NewStrategy(cfg, testLogger, supervisor, model)
 	req := &strategy.Request{
 		Body:    []byte(fmt.Sprintf(`{"model":%q,"fake_delay":%q}`, model, delay)),
 		Headers: http.Header{"X-Session-Affinity": {session}},
@@ -34,27 +35,27 @@ func handleAsync(m *Monitor, cfg *config.Config, model string, session string, d
 
 func TestHandleSurvivesIdleTimeoutDuringRequest(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 1, "a")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 
-	status := receiveWithin(t, handleAsync(m, cfg, "a", "session", 1500*time.Millisecond), handleTimeout, "request outlasting the idle timeout")
+	status := receiveWithin(t, handleAsync(supervisor, cfg, "a", "session", 1500*time.Millisecond), handleTimeout, "request outlasting the idle timeout")
 	if status != http.StatusOK {
 		t.Fatalf("status %d, want %d", status, http.StatusOK)
 	}
 
-	srv := currentServer(m)
+	srv := currentServer(supervisor)
 	waitUntil(t, 5*time.Second, "idle stop after the request", srv.Exited)
 }
 
 func TestHandleSwitchesModelWhileRequestInFlight(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a", "b")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 
-	first := handleAsync(m, cfg, "a", "session", 800*time.Millisecond)
+	first := handleAsync(supervisor, cfg, "a", "session", 800*time.Millisecond)
 	waitUntil(t, handleTimeout, "first request holding the slot", func() bool {
-		slots := currentSlots(m)
+		slots := currentSlots(supervisor)
 		return slots != nil && busySlots(slots) == 1
 	})
-	second := handleAsync(m, cfg, "b", "session", 0)
+	second := handleAsync(supervisor, cfg, "b", "session", 0)
 
 	for _, tt := range []struct {
 		name     string
@@ -67,7 +68,7 @@ func TestHandleSwitchesModelWhileRequestInFlight(t *testing.T) {
 			t.Errorf("%s: status %d, want %d", tt.name, status, http.StatusOK)
 		}
 	}
-	if got := currentServer(m).Selector(); got != "b" {
+	if got := currentServer(supervisor).Selector(); got != "b" {
 		t.Errorf("current model %q, want %q", got, "b")
 	}
 }
@@ -87,15 +88,15 @@ func TestHandleServesSessionsInParallelUpToSlotCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
 			cfg.Models["a"].LlamaCpp.Slots = tt.slots
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 
-			slow := handleAsync(m, cfg, "a", "slow", slowRequest)
+			slow := handleAsync(supervisor, cfg, "a", "slow", slowRequest)
 			waitUntil(t, handleTimeout, "slow request holding a slot", func() bool {
-				slots := currentSlots(m)
+				slots := currentSlots(supervisor)
 				return slots != nil && busySlots(slots) == 1
 			})
 			start := time.Now()
-			fast := handleAsync(m, cfg, "a", "fast", 0)
+			fast := handleAsync(supervisor, cfg, "a", "fast", 0)
 
 			if status := receiveWithin(t, fast, handleTimeout, "fast request"); status != http.StatusOK {
 				t.Errorf("fast request status %d, want %d", status, http.StatusOK)
@@ -123,19 +124,19 @@ func TestHandleKeepsSlotForSessionWhateverTheUpstreamStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{
 				Body:    []byte(fmt.Sprintf(`{"model":"a","fake_status":%d}`, tt.status)),
 				Headers: http.Header{"X-Session-Affinity": {"session"}},
 			}
 
 			recorder := httptest.NewRecorder()
-			NewStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != tt.status {
 				t.Fatalf("status %d, want %d", recorder.Code, tt.status)
 			}
-			slot := currentSlots(m).slots[0]
+			slot := currentSlots(supervisor).slots[0]
 			if slot.session != "session" || !slot.unsaved {
 				t.Errorf("slot session %q unsaved %v, want %q unsaved true", slot.session, slot.unsaved, "session")
 			}
@@ -159,19 +160,19 @@ func TestHandleRejectsBodyThatIsNotJSONObject(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{
 				Body:    []byte(tt.body),
 				Headers: http.Header{"X-Session-Affinity": {"session"}},
 			}
 
 			recorder := httptest.NewRecorder()
-			NewStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
 			}
-			if currentServer(m) != nil {
+			if currentServer(supervisor) != nil {
 				t.Error("started a llama server for a rejected body")
 			}
 		})
@@ -209,7 +210,7 @@ func TestHandleWritesErrorsAsJSON(t *testing.T) {
 			body:              `{"model":"broken"}`,
 			wantStatus:        http.StatusServiceUnavailable,
 			wantType:          strategy.ErrorTypeServer,
-			wantMessagePrefix: errStartFailed.Error() + ": ",
+			wantMessagePrefix: lane.ErrStartFailed.Error() + ": ",
 		},
 	}
 
@@ -217,11 +218,11 @@ func TestHandleWritesErrorsAsJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a", "broken")
 			cfg.Models["broken"].LlamaCpp.Bin = filepath.Join(t.TempDir(), "missing-llama-server")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{Body: []byte(tt.body)}
 
 			recorder := httptest.NewRecorder()
-			NewStrategy(cfg, testLogger, m, tt.selector).Handle(context.Background(), recorder, req)
+			NewStrategy(cfg, testLogger, supervisor, tt.selector).Handle(context.Background(), recorder, req)
 
 			if recorder.Code != tt.wantStatus {
 				t.Errorf("status %d, want %d", recorder.Code, tt.wantStatus)
@@ -244,7 +245,7 @@ func TestHandleWritesErrorsAsJSON(t *testing.T) {
 
 func TestHandlePassesBodyValuesThroughUnchanged(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 
 	tests := []struct {
 		name  string
@@ -263,7 +264,7 @@ func TestHandlePassesBodyValuesThroughUnchanged(t *testing.T) {
 			}
 
 			recorder := httptest.NewRecorder()
-			NewStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -277,7 +278,7 @@ func TestHandlePassesBodyValuesThroughUnchanged(t *testing.T) {
 
 func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 
 	tests := []struct {
 		name    string
@@ -294,12 +295,12 @@ func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 			req := &strategy.Request{Body: []byte(`{"model":"a"}`), Headers: tt.headers}
 
 			recorder := httptest.NewRecorder()
-			NewStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
 			}
-			if got := currentSlots(m).slots[0].session; got != tt.want {
+			if got := currentSlots(supervisor).slots[0].session; got != tt.want {
 				t.Errorf("slot session %q, want %q", got, tt.want)
 			}
 		})
@@ -309,20 +310,20 @@ func TestHandleUsesTrimmedSessionForSlot(t *testing.T) {
 func TestHandleForwardsToEndpointPath(t *testing.T) {
 	tests := []struct {
 		name         string
-		newStrategy  func(cfg *config.Config, m *Monitor) *Strategy
+		newStrategy  func(cfg *config.Config, supervisor *lane.Supervisor) *Strategy
 		wantResponse string
 	}{
 		{
 			name: "chat completions",
-			newStrategy: func(cfg *config.Config, m *Monitor) *Strategy {
-				return NewStrategy(cfg, testLogger, m, "a")
+			newStrategy: func(cfg *config.Config, supervisor *lane.Supervisor) *Strategy {
+				return NewStrategy(cfg, testLogger, supervisor, "a")
 			},
 			wantResponse: fakeChatCompletionResponse,
 		},
 		{
 			name: "messages",
-			newStrategy: func(cfg *config.Config, m *Monitor) *Strategy {
-				return NewMessagesStrategy(cfg, testLogger, m, "a")
+			newStrategy: func(cfg *config.Config, supervisor *lane.Supervisor) *Strategy {
+				return NewMessagesStrategy(cfg, testLogger, supervisor, "a")
 			},
 			wantResponse: fakeMessagesResponse,
 		},
@@ -331,14 +332,14 @@ func TestHandleForwardsToEndpointPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{
 				Body:    []byte(`{"model":"a"}`),
 				Headers: http.Header{"X-Claude-Code-Session-Id": {"cc"}},
 			}
 
 			recorder := httptest.NewRecorder()
-			tt.newStrategy(cfg, m).Handle(context.Background(), recorder, req)
+			tt.newStrategy(cfg, supervisor).Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -346,7 +347,7 @@ func TestHandleForwardsToEndpointPath(t *testing.T) {
 			if got := recorder.Body.String(); got != tt.wantResponse {
 				t.Errorf("response %s, want %s", got, tt.wantResponse)
 			}
-			if got := currentSlots(m).slots[0].session; got != "cc" {
+			if got := currentSlots(supervisor).slots[0].session; got != "cc" {
 				t.Errorf("slot session %q, want %q", got, "cc")
 			}
 		})
@@ -355,14 +356,14 @@ func TestHandleForwardsToEndpointPath(t *testing.T) {
 
 func TestMessagesHandlePinsSlot(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "a")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 	req := &strategy.Request{
 		Body:    []byte(`{"model":"a","fake_echo":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`),
 		Headers: http.Header{"X-Session-Affinity": {"session"}},
 	}
 
 	recorder := httptest.NewRecorder()
-	NewMessagesStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+	NewMessagesStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -404,11 +405,11 @@ func TestHandleWritesErrorsWithRequestErrorWriter(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{Body: []byte(`hello`), Errors: tt.errors}
 
 			recorder := httptest.NewRecorder()
-			NewMessagesStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewMessagesStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)

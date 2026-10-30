@@ -12,6 +12,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/anthropic"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
@@ -92,7 +93,7 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 					body = unreadableBody{}
 				}
 				recorder := httptest.NewRecorder()
-				e.handler(New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()))(recorder, httptest.NewRequest(http.MethodPost, e.path, body))
+				e.handler(New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))))(recorder, httptest.NewRequest(http.MethodPost, e.path, body))
 
 				if recorder.Code != http.StatusBadRequest {
 					t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -136,7 +137,7 @@ func TestHandlerForwardsAnthropicModelToProvider(t *testing.T) {
 			req.Header.Set("X-Api-Key", "sk-client")
 
 			recorder := httptest.NewRecorder()
-			e.handler(New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()))(recorder, req)
+			e.handler(New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))))(recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -174,7 +175,7 @@ func TestHandlerPassesUpstreamErrorsThrough(t *testing.T) {
 		t.Run(fmt.Sprintf("stream %v", stream), func(t *testing.T) {
 			body := fmt.Sprintf(`{"model":"claude","stream":%v}`, stream)
 			recorder := httptest.NewRecorder()
-			New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, httptest.NewRequest(http.MethodPost, strategy.MessagesPath, strings.NewReader(body)))
+			New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))).Handler(recorder, httptest.NewRequest(http.MethodPost, strategy.MessagesPath, strings.NewReader(body)))
 
 			if recorder.Code != 529 {
 				t.Errorf("status %d, want %d", recorder.Code, 529)
@@ -228,7 +229,7 @@ func TestNewStrategy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := New(&config.Config{}, logger.New("ERROR"), llamaserver.NewMonitor())
+			router := New(&config.Config{}, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR")))
 			for _, factory := range []struct {
 				name string
 				new  strategyFactory

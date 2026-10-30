@@ -13,6 +13,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/chatcompletion"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
@@ -76,7 +77,7 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: "http://127.0.0.1:1"}},
 			}
 
-			recorder := serveCompletion(New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()), tt.body)
+			recorder := serveCompletion(New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))), tt.body)
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -131,7 +132,7 @@ func TestHandlerFollowsModelConfigOnEveryRequest(t *testing.T) {
 				Models:    map[string]config.ModelEntry{},
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: upstream.URL}},
 			}
-			router := New(cfg, logger.New("ERROR"), llamaserver.NewMonitor())
+			router := New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR")))
 
 			var got []string
 			for _, upstreamModel := range tt.upstreamModels {
@@ -178,7 +179,7 @@ func TestHandlerForwardsEveryHeaderValue(t *testing.T) {
 			}
 
 			recorder := httptest.NewRecorder()
-			New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, req)
+			New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))).Handler(recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -204,7 +205,7 @@ func TestHandlerWritesBodyErrorsAsJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			New(&config.Config{}, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", tt.body))
+			New(&config.Config{}, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))).Handler(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", tt.body))
 
 			if recorder.Code != http.StatusBadRequest {
 				t.Errorf("status %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -264,7 +265,7 @@ func TestNewStrategy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := New(&config.Config{}, logger.New("ERROR"), llamaserver.NewMonitor()).newStrategy("m", tt.entry)
+			got, err := New(&config.Config{}, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))).newStrategy("m", tt.entry)
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("error %v, want %q", err, tt.wantErr)
@@ -306,7 +307,7 @@ func TestHandlerForwardsQuery(t *testing.T) {
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: upstream.URL}},
 			}
 			recorder := httptest.NewRecorder()
-			New(cfg, logger.New("ERROR"), llamaserver.NewMonitor()).Handler(recorder, httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(`{"model":"m"}`)))
+			New(cfg, logger.New("ERROR"), lane.NewSupervisor(0, logger.New("ERROR"))).Handler(recorder, httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(`{"model":"m"}`)))
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)

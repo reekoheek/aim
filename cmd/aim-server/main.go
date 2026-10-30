@@ -16,6 +16,7 @@ import (
 	"github.com/reekoheek/aim/internal/cors"
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
 	"github.com/reekoheek/aim/pkg/router/messages"
 	"github.com/reekoheek/aim/pkg/router/systemone"
@@ -81,10 +82,10 @@ func run(cmd *cobra.Command, args []string) error {
 		l.Info("configured model", slog.String("id", modelID))
 	}
 
-	llamaServers := llamaserver.NewMonitor()
-	chatCompletionRouter := chatcompletion.New(cfg, l, llamaServers)
-	systemOneRouter := systemone.New(cfg, l, llamaServers)
-	messagesRouter := messages.New(cfg, l, llamaServers)
+	supervisor := lane.NewSupervisor(cfg.DefaultServer().IdleTimeoutDuration(), l)
+	chatCompletionRouter := chatcompletion.New(cfg, l, supervisor)
+	systemOneRouter := systemone.New(cfg, l, supervisor)
+	messagesRouter := messages.New(cfg, l, supervisor)
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
@@ -133,7 +134,7 @@ func run(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(ctx)
-		llamaServers.Close(ctx)
+		supervisor.Close(ctx)
 	}()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

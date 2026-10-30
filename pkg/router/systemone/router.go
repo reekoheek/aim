@@ -9,6 +9,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
 	"github.com/reekoheek/aim/pkg/strategy/systemone"
@@ -20,16 +21,16 @@ const (
 )
 
 type Router struct {
-	cfg          *config.Config
-	logger       *logger.Logger
-	llamaServers *llamaserver.Monitor
+	cfg        *config.Config
+	logger     *logger.Logger
+	supervisor *lane.Supervisor
 }
 
-func New(cfg *config.Config, l *logger.Logger, llamaServers *llamaserver.Monitor) *Router {
+func New(cfg *config.Config, l *logger.Logger, supervisor *lane.Supervisor) *Router {
 	return &Router{
-		cfg:          cfg,
-		logger:       l,
-		llamaServers: llamaServers,
+		cfg:        cfg,
+		logger:     l,
+		supervisor: supervisor,
 	}
 }
 
@@ -89,7 +90,7 @@ func (r *Router) newStrategy(selector string, entry config.ModelEntry) (strategy
 	case config.ModelTypeSystemOne:
 		return systemone.NewStrategy(r.cfg, r.logger, entry.Provider, entry.Model), nil
 	case config.ModelTypeLlamaServer:
-		return llamaserver.NewSystemOneStrategy(r.cfg, r.logger, r.llamaServers, selector), nil
+		return llamaserver.NewSystemOneStrategy(r.cfg, r.logger, r.supervisor, selector), nil
 	case config.ModelTypeChatCompletion:
 		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.ChatCompletionsPath)
 	case config.ModelTypeAnthropic:

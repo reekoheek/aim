@@ -9,35 +9,36 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/forwarder"
 )
 
 type Strategy struct {
-	cfg       *config.Config
-	logger    *logger.Logger
-	monitor   *Monitor
-	forwarder *forwarder.Forwarder
-	selector  string
-	path      string
+	cfg        *config.Config
+	logger     *logger.Logger
+	supervisor *lane.Supervisor
+	forwarder  *forwarder.Forwarder
+	selector   string
+	path       string
 }
 
-func NewStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string) *Strategy {
-	return newStrategy(cfg, l, monitor, selector, strategy.ChatCompletionsPath)
+func NewStrategy(cfg *config.Config, l *logger.Logger, supervisor *lane.Supervisor, selector string) *Strategy {
+	return newStrategy(cfg, l, supervisor, selector, strategy.ChatCompletionsPath)
 }
 
-func NewMessagesStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string) *Strategy {
-	return newStrategy(cfg, l, monitor, selector, strategy.MessagesPath)
+func NewMessagesStrategy(cfg *config.Config, l *logger.Logger, supervisor *lane.Supervisor, selector string) *Strategy {
+	return newStrategy(cfg, l, supervisor, selector, strategy.MessagesPath)
 }
 
-func newStrategy(cfg *config.Config, l *logger.Logger, monitor *Monitor, selector string, path string) *Strategy {
+func newStrategy(cfg *config.Config, l *logger.Logger, supervisor *lane.Supervisor, selector string, path string) *Strategy {
 	return &Strategy{
-		cfg:       cfg,
-		logger:    l,
-		monitor:   monitor,
-		forwarder: forwarder.New(client, l),
-		selector:  selector,
-		path:      path,
+		cfg:        cfg,
+		logger:     l,
+		supervisor: supervisor,
+		forwarder:  forwarder.New(client, l),
+		selector:   selector,
+		path:       path,
 	}
 }
 
@@ -49,16 +50,17 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 		return
 	}
 
-	srv, slots, err := s.monitor.Acquire(ctx, s.cfg, s.logger, s.selector)
+	lease, err := runServer(ctx, s.supervisor, s.cfg, s.logger, s.selector)
 	if err != nil {
-		s.logger.LogError("failed to acquire llama server", err, slog.String("selector", s.selector))
-		req.WriteError(w, acquireErrorStatus(err), strategy.ErrorTypeServer, err.Error())
+		s.logger.LogError("failed to run llama server", err, slog.String("selector", s.selector))
+		req.WriteError(w, runErrorStatus(err), strategy.ErrorTypeServer, err.Error())
 		return
 	}
 
-	defer srv.ExitRequest()
+	defer lease.Release()
+	srv := lease.Process
 
-	if slots != nil {
+	if slots := srv.cachedSlots(); slots != nil {
 		session := req.SessionID()
 		slotID, release, err := slots.acquire(ctx, session)
 		if err != nil {
@@ -77,8 +79,8 @@ func (s *Strategy) Handle(ctx context.Context, w http.ResponseWriter, req *strat
 	s.forwarder.Forward(ctx, w, req, targetURL, nil)
 }
 
-func acquireErrorStatus(err error) int {
-	if errors.Is(err, errStartFailed) {
+func runErrorStatus(err error) int {
+	if errors.Is(err, lane.ErrStartFailed) {
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusInternalServerError

@@ -27,6 +27,7 @@ const (
 	defaultLlamaServerURL = "http://127.0.0.1:%d"
 	defaultSlots          = 1
 	anyCORSOrigin         = "*"
+	DefaultLane           = "default"
 )
 
 const (
@@ -82,6 +83,7 @@ func (f LlamaCppFlags) overlay(top LlamaCppFlags) LlamaCppFlags {
 }
 
 type LlamaCppEntry struct {
+	Lane        string
 	Bin         string
 	URL         string
 	Port        int
@@ -95,6 +97,7 @@ type ModelEntry struct {
 	Type        string         `yaml:"type"`
 	Provider    string         `yaml:"provider"`
 	Model       string         `yaml:"model"`
+	Lane        string         `yaml:"lane"`
 	LlamaCpp    *LlamaCppEntry `yaml:"-"`
 	Flags       LlamaCppFlags  `yaml:"flags"`
 	Bin         string         `yaml:"bin"`
@@ -214,6 +217,13 @@ func (c *Config) DefaultServer() ServerConfig {
 	return c.Server
 }
 
+func (s ServerConfig) IdleTimeoutDuration() time.Duration {
+	if s.IdleTimeout == nil {
+		return defaultIdleTimeout
+	}
+	return time.Duration(*s.IdleTimeout) * time.Second
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -243,6 +253,9 @@ func Load(path string) (*Config, error) {
 
 	for id, entry := range cfg.Models {
 		if entry.Type != ModelTypeLlamaServer {
+			if entry.Lane != "" {
+				return nil, fmt.Errorf("model %q: lane is only for type %s", id, ModelTypeLlamaServer)
+			}
 			continue
 		}
 		llama, err := cfg.newLlamaCppEntry(id, entry)
@@ -280,6 +293,7 @@ func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppE
 	}
 
 	llama := &LlamaCppEntry{
+		Lane:        cmp.Or(entry.Lane, DefaultLane),
 		Bin:         cmp.Or(entry.Bin, defaultLlamaServerBin),
 		URL:         cmp.Or(entry.URL, flags.URL),
 		Port:        cmp.Or(flags.Port, portFromSelector(selector)),

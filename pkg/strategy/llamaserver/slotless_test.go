@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 )
 
-func handleSystemOneAsync(m *Monitor, cfg *config.Config, model string, session string, delay time.Duration) <-chan int {
-	s := NewSystemOneStrategy(cfg, testLogger, m, model)
+func handleSystemOneAsync(supervisor *lane.Supervisor, cfg *config.Config, model string, session string, delay time.Duration) <-chan int {
+	s := NewSystemOneStrategy(cfg, testLogger, supervisor, model)
 	req := &strategy.Request{
 		Body:    []byte(fmt.Sprintf(`{"model":%q,"fake_delay":%q}`, model, delay)),
 		Headers: http.Header{"X-Session-Affinity": {session}},
@@ -43,11 +44,11 @@ func TestSystemOneHandleForwardsToSystemOne(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{Body: []byte(fmt.Sprintf(`{"model":"a","fake_status":%d}`, tt.status))}
 
 			recorder := httptest.NewRecorder()
-			NewSystemOneStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewSystemOneStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != tt.status {
 				t.Errorf("status %d, want %d", recorder.Code, tt.status)
@@ -71,12 +72,12 @@ func TestSystemOneHandlePassesBodyThroughWithoutSlot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			body := `{"model":"a","fake_echo":true,"state":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}},"seed":9007199254740993}`
 			req := &strategy.Request{Body: []byte(body), Headers: tt.headers}
 
 			recorder := httptest.NewRecorder()
-			NewSystemOneStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewSystemOneStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -84,7 +85,7 @@ func TestSystemOneHandlePassesBodyThroughWithoutSlot(t *testing.T) {
 			if got := recorder.Body.String(); got != body {
 				t.Errorf("upstream body %s, want %s", got, body)
 			}
-			for _, slot := range currentSlots(m).slots {
+			for _, slot := range currentSlots(supervisor).slots {
 				if slot.session != "" || slot.busy || slot.unsaved {
 					t.Errorf("slot %d session %q busy %v unsaved %v, want untouched", slot.id, slot.session, slot.busy, slot.unsaved)
 				}
@@ -107,20 +108,17 @@ func TestSystemOneHandleIsNotLimitedBySlots(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
-			if status := receiveWithin(t, handleSystemOneAsync(m, cfg, "a", tt.slowSession, 0), handleTimeout, "server start"); status != http.StatusOK {
+			supervisor := newTestSupervisor(t, cfg)
+			if status := receiveWithin(t, handleSystemOneAsync(supervisor, cfg, "a", tt.slowSession, 0), handleTimeout, "server start"); status != http.StatusOK {
 				t.Fatalf("server start status %d, want %d", status, http.StatusOK)
 			}
 
-			slow := handleSystemOneAsync(m, cfg, "a", tt.slowSession, slowRequest)
+			slow := handleSystemOneAsync(supervisor, cfg, "a", tt.slowSession, slowRequest)
 			waitUntil(t, handleTimeout, "slow request in flight", func() bool {
-				srv := currentServer(m)
-				srv.idleMu.Lock()
-				defer srv.idleMu.Unlock()
-				return srv.active == 1
+				return supervisor.Lane(config.DefaultLane).Leases() == 1
 			})
 			start := time.Now()
-			fast := handleSystemOneAsync(m, cfg, "a", tt.fastSession, 0)
+			fast := handleSystemOneAsync(supervisor, cfg, "a", tt.fastSession, 0)
 
 			if status := receiveWithin(t, fast, handleTimeout, "fast request"); status != http.StatusOK {
 				t.Errorf("fast request status %d, want %d", status, http.StatusOK)
@@ -137,23 +135,23 @@ func TestSystemOneHandleIsNotLimitedBySlots(t *testing.T) {
 
 func TestSystemOneHandleSharesServerWithChat(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "chat", "decider")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 
 	steps := []struct {
 		name  string
 		serve func() <-chan int
 		want  string
 	}{
-		{name: "chat request", serve: func() <-chan int { return handleAsync(m, cfg, "chat", "session", 0) }, want: "chat"},
-		{name: "systemone request swaps the model", serve: func() <-chan int { return handleSystemOneAsync(m, cfg, "decider", "session", 0) }, want: "decider"},
-		{name: "chat request swaps back", serve: func() <-chan int { return handleAsync(m, cfg, "chat", "session", 0) }, want: "chat"},
+		{name: "chat request", serve: func() <-chan int { return handleAsync(supervisor, cfg, "chat", "session", 0) }, want: "chat"},
+		{name: "systemone request swaps the model", serve: func() <-chan int { return handleSystemOneAsync(supervisor, cfg, "decider", "session", 0) }, want: "decider"},
+		{name: "chat request swaps back", serve: func() <-chan int { return handleAsync(supervisor, cfg, "chat", "session", 0) }, want: "chat"},
 	}
 
 	for _, step := range steps {
 		if status := receiveWithin(t, step.serve(), handleTimeout, step.name); status != http.StatusOK {
 			t.Fatalf("%s: status %d, want %d", step.name, status, http.StatusOK)
 		}
-		if got := currentServer(m).Selector(); got != step.want {
+		if got := currentServer(supervisor).Selector(); got != step.want {
 			t.Errorf("%s: current model %q, want %q", step.name, got, step.want)
 		}
 	}
@@ -176,7 +174,7 @@ func TestSystemOneHandleWritesErrorsAsJSON(t *testing.T) {
 			name:              "llama server fails to start",
 			selector:          "broken",
 			wantStatus:        http.StatusServiceUnavailable,
-			wantMessagePrefix: errStartFailed.Error() + ": ",
+			wantMessagePrefix: lane.ErrStartFailed.Error() + ": ",
 		},
 	}
 
@@ -184,11 +182,11 @@ func TestSystemOneHandleWritesErrorsAsJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "broken")
 			cfg.Models["broken"].LlamaCpp.Bin = filepath.Join(t.TempDir(), "missing-llama-server")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{Body: []byte(fmt.Sprintf(`{"model":%q}`, tt.selector))}
 
 			recorder := httptest.NewRecorder()
-			NewSystemOneStrategy(cfg, testLogger, m, tt.selector).Handle(context.Background(), recorder, req)
+			NewSystemOneStrategy(cfg, testLogger, supervisor, tt.selector).Handle(context.Background(), recorder, req)
 
 			if recorder.Code != tt.wantStatus {
 				t.Errorf("status %d, want %d", recorder.Code, tt.wantStatus)
@@ -221,11 +219,11 @@ func TestCountTokensHandleForwardsWithoutSlot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := newFakeLlamaConfig(t, 0, "a")
-			m := newTestMonitor(t)
+			supervisor := newTestSupervisor(t, cfg)
 			req := &strategy.Request{Body: []byte(`{"model":"a","messages":[]}`), Headers: tt.headers}
 
 			recorder := httptest.NewRecorder()
-			NewCountTokensStrategy(cfg, testLogger, m, "a").Handle(context.Background(), recorder, req)
+			NewCountTokensStrategy(cfg, testLogger, supervisor, "a").Handle(context.Background(), recorder, req)
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body)
@@ -233,7 +231,7 @@ func TestCountTokensHandleForwardsWithoutSlot(t *testing.T) {
 			if got := recorder.Body.String(); got != fakeCountTokensResponse {
 				t.Errorf("response %s, want %s", got, fakeCountTokensResponse)
 			}
-			for _, slot := range currentSlots(m).slots {
+			for _, slot := range currentSlots(supervisor).slots {
 				if slot.session != "" || slot.busy || slot.unsaved {
 					t.Errorf("slot %d session %q busy %v unsaved %v, want untouched", slot.id, slot.session, slot.busy, slot.unsaved)
 				}
@@ -245,11 +243,11 @@ func TestCountTokensHandleForwardsWithoutSlot(t *testing.T) {
 func TestCountTokensHandleWritesAnthropicErrors(t *testing.T) {
 	cfg := newFakeLlamaConfig(t, 0, "broken")
 	cfg.Models["broken"].LlamaCpp.Bin = filepath.Join(t.TempDir(), "missing-llama-server")
-	m := newTestMonitor(t)
+	supervisor := newTestSupervisor(t, cfg)
 	req := &strategy.Request{Body: []byte(`{"model":"broken"}`), Errors: strategy.AnthropicErrors{}}
 
 	recorder := httptest.NewRecorder()
-	NewCountTokensStrategy(cfg, testLogger, m, "broken").Handle(context.Background(), recorder, req)
+	NewCountTokensStrategy(cfg, testLogger, supervisor, "broken").Handle(context.Background(), recorder, req)
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Errorf("status %d, want %d", recorder.Code, http.StatusServiceUnavailable)
@@ -264,7 +262,7 @@ func TestCountTokensHandleWritesAnthropicErrors(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
 		t.Fatalf("body %s is not JSON: %v", recorder.Body, err)
 	}
-	if got.Type != "error" || got.Error.Type != "api_error" || !strings.HasPrefix(got.Error.Message, errStartFailed.Error()+": ") {
-		t.Errorf("error %+v, want an api_error starting with %q", got, errStartFailed.Error())
+	if got.Type != "error" || got.Error.Type != "api_error" || !strings.HasPrefix(got.Error.Message, lane.ErrStartFailed.Error()+": ") {
+		t.Errorf("error %+v, want an api_error starting with %q", got, lane.ErrStartFailed.Error())
 	}
 }

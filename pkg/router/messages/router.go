@@ -9,6 +9,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 	"github.com/reekoheek/aim/pkg/strategy/anthropic"
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
@@ -17,17 +18,17 @@ import (
 type strategyFactory func(selector string, entry config.ModelEntry) (strategy.Strategy, error)
 
 type Router struct {
-	cfg          *config.Config
-	logger       *logger.Logger
-	llamaServers *llamaserver.Monitor
-	errors       strategy.AnthropicErrors
+	cfg        *config.Config
+	logger     *logger.Logger
+	supervisor *lane.Supervisor
+	errors     strategy.AnthropicErrors
 }
 
-func New(cfg *config.Config, l *logger.Logger, llamaServers *llamaserver.Monitor) *Router {
+func New(cfg *config.Config, l *logger.Logger, supervisor *lane.Supervisor) *Router {
 	return &Router{
-		cfg:          cfg,
-		logger:       l,
-		llamaServers: llamaServers,
+		cfg:        cfg,
+		logger:     l,
+		supervisor: supervisor,
 	}
 }
 
@@ -95,7 +96,7 @@ func (r *Router) newMessagesStrategy(selector string, entry config.ModelEntry) (
 	case config.ModelTypeAnthropic:
 		return anthropic.NewStrategy(r.cfg, r.logger, entry.Provider, entry.Model, strategy.MessagesPath), nil
 	case config.ModelTypeLlamaServer:
-		return llamaserver.NewMessagesStrategy(r.cfg, r.logger, r.llamaServers, selector), nil
+		return llamaserver.NewMessagesStrategy(r.cfg, r.logger, r.supervisor, selector), nil
 	default:
 		return nil, otherEndpointError(selector, entry)
 	}
@@ -106,7 +107,7 @@ func (r *Router) newCountTokensStrategy(selector string, entry config.ModelEntry
 	case config.ModelTypeAnthropic:
 		return anthropic.NewStrategy(r.cfg, r.logger, entry.Provider, entry.Model, strategy.CountTokensPath), nil
 	case config.ModelTypeLlamaServer:
-		return llamaserver.NewCountTokensStrategy(r.cfg, r.logger, r.llamaServers, selector), nil
+		return llamaserver.NewCountTokensStrategy(r.cfg, r.logger, r.supervisor, selector), nil
 	default:
 		return nil, otherEndpointError(selector, entry)
 	}

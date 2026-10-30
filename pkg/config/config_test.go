@@ -172,6 +172,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
@@ -206,6 +207,7 @@ models:
 `,
 			selector: "b",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				Port:        portFromSelector("b"),
 				StopTimeout: 30 * time.Second,
@@ -231,6 +233,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				URL:         "http://127.0.0.1:12345",
 				Port:        12345,
@@ -251,6 +254,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				URL:         "http://model-level:1",
 				Port:        portFromSelector("m"),
@@ -268,6 +272,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "/opt/llama/llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
@@ -286,6 +291,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
@@ -304,6 +310,7 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
@@ -321,10 +328,28 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:        DefaultLane,
 				Bin:         "llama-server",
 				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
 				Slots:       0,
+			},
+		},
+		{
+			name: "lane read by aim to group models that swap",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    lane: gpu
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
+				Lane:        "gpu",
+				Bin:         "llama-server",
+				Port:        portFromSelector("m"),
+				StopTimeout: 30 * time.Second,
+				Slots:       1,
 			},
 		},
 		{
@@ -397,6 +422,21 @@ func TestLoadRejectsInvalidLlamaServerSettings(t *testing.T) {
 		yaml    string
 		wantErr string
 	}{
+		{
+			name: "lane on a model that runs no local process",
+			yaml: `
+providers:
+  p:
+    base_url: http://localhost
+models:
+  m:
+    type: chat-completion
+    provider: p
+    model: x
+    lane: gpu
+`,
+			wantErr: `model "m": lane is only for type llama-server`,
+		},
 		{
 			name: "negative slots",
 			yaml: `
@@ -714,6 +754,29 @@ server:
 			}
 			if *got != tt.want {
 				t.Errorf("got %d, want %d", *got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerConfigIdleTimeoutDuration(t *testing.T) {
+	seconds := func(value int) *int { return &value }
+	tests := []struct {
+		name        string
+		idleTimeout *int
+		want        time.Duration
+	}{
+		{name: "unset uses default", idleTimeout: nil, want: defaultIdleTimeout},
+		{name: "zero disables", idleTimeout: seconds(0), want: 0},
+		{name: "configured", idleTimeout: seconds(300), want: 300 * time.Second},
+		{name: "one second", idleTimeout: seconds(1), want: time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ServerConfig{IdleTimeout: tt.idleTimeout}.IdleTimeoutDuration()
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
 	}

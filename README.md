@@ -50,7 +50,7 @@ server:
   save_slot_path: /var/cache/aim/slots # optional, default: <user cache dir>/aim/slots
   slot_expiration: 1h                  # optional, default: 1h
   slot_max_files: 3                    # optional, default: 3
-  idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m, 0 = never)
+  idle_timeout: 300                    # optional, seconds of inactivity before aim stops a lane's llama-server (default 300 = 5m, 0 = never)
   cors_origins:                        # optional, browser origins allowed to call aim (default: none, CORS off)
     - http://localhost:3000
 ```
@@ -66,7 +66,7 @@ Both limits are also applied on startup and then periodically (every `slot_expir
 
 ### Local llama-server models
 
-A `llama-server` model is started on demand (one at a time). In its `flags`, every key that starts with `-` is a llama-server flag written exactly as on the command line, and is passed as-is:
+A `llama-server` model is started on demand in its lane. In its `flags`, every key that starts with `-` is a llama-server flag written exactly as on the command line, and is passed as-is:
 
 - `-hf: org/repo` → `-hf org/repo`, `--temp: 0.6` → `--temp 0.6`
 - `true` adds a switch on its own (`--jinja: true` → `--jinja`), `false` leaves it out; `-fa: on` stays `-fa on`
@@ -78,6 +78,8 @@ Keys without a dash are aim settings:
 - `port`, `url` — where aim runs and reaches llama-server
 
 Next to `flags`, a model also takes `bin` (default: `llama-server` from `PATH`) and `stop_timeout` (seconds aim waits for llama-server to stop before killing it, default 30).
+
+`lane: <name>`, also next to `flags`, picks where the model's llama-server runs (default `default`). A lane runs one llama-server at a time: a request for another model on the same lane waits for the requests in flight, stops the running llama-server and starts its own. Models on different lanes run side by side, e.g. a chat model on `lane: gpu` next to a small decision model on `lane: cpu`. Each lane stops its llama-server after `idle_timeout` on its own. `lane` is only accepted on `llama-server` models.
 
 `slots` and `ctx`, also next to `flags`, size the model's slots:
 
@@ -100,6 +102,7 @@ models:
     type: llama-server
     bin: /path/to/llama-server   # optional, default: llama-server from PATH
     stop_timeout: 10             # optional, seconds before kill (default 30)
+    lane: gpu                    # optional, models on the same lane swap (default: default)
     slots: 2                     # optional, parallel slots (default 1, 0 = no slot cache)
     ctx: 128000                  # optional, context per slot; aim passes -c 256000
     flags:
@@ -137,7 +140,7 @@ curl -X POST http://localhost:8080/v1/systemone \
 
 - `model` and a non-empty `questions` object are required; everything else is passed to llama-server as-is. There is no streaming.
 - the model must be `type: systemone` (forwarded to the provider) or `type: llama-server`; a `chat-completion` or `anthropic` model is rejected, and so is a `systemone` model on `/v1/chat/completions`
-- a `llama-server` decision model is a normal `llama-server` entry and takes turns with the chat models (one llama-server at a time). The slot cache is not used for it: llama-server picks the slots for decision requests itself, so `X-Session-Affinity` is ignored and nothing is saved or restored, and `slots: N` only sets how many questions run in parallel. A `llama-server` model that is not a decision model answers 501.
+- a `llama-server` decision model is a normal `llama-server` entry and takes turns with the chat models on its lane (one llama-server per lane at a time). The slot cache is not used for it: llama-server picks the slots for decision requests itself, so `X-Session-Affinity` is ignored and nothing is saved or restored, and `slots: N` only sets how many questions run in parallel. A `llama-server` model that is not a decision model answers 501.
 
 ```yaml
 models:
@@ -179,7 +182,7 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16000
 claude
 ```
 
-- Claude Code asks for `ANTHROPIC_MODEL` and, for background calls, `ANTHROPIC_DEFAULT_HAIKU_MODEL`. Point both at the same `llama-server` model: aim runs one llama-server at a time, so a different haiku model makes it switch models for every background call.
+- Claude Code asks for `ANTHROPIC_MODEL` and, for background calls, `ANTHROPIC_DEFAULT_HAIKU_MODEL`. Point both at the same `llama-server` model: aim runs one llama-server per lane at a time, so a different haiku model on the same lane makes it switch models for every background call.
 - Claude Code compacts the conversation only on Anthropic's "prompt is too long" error, which llama-server does not send. Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's `ctx` so it compacts before the context is full (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` moves that point, 100000 at the lowest), and keep `CLAUDE_CODE_MAX_OUTPUT_TOKENS` well below `ctx`.
 - with an `anthropic` provider that rejects Anthropic's newest beta fields, set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`
 

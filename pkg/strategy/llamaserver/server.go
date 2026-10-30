@@ -18,6 +18,7 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 )
 
 const (
@@ -26,7 +27,6 @@ const (
 	startTimeout       = 30 * time.Second
 	healthPollInterval = 500 * time.Millisecond
 	defaultStopTimeout = 5 * time.Second
-	defaultIdleTimeout = 5 * time.Minute
 	minParallelSlots   = 1
 )
 
@@ -38,24 +38,19 @@ type Server struct {
 	parallelSlots int
 	slotContext   int
 	stopTimeout   time.Duration
-	idleTimeout   time.Duration
 	selector      string
-	onIdle        func(*Server)
+	server        config.ServerConfig
+	slotDir       string
+	slots         *slotCache
 	cmd           *exec.Cmd
 	done          chan struct{}
 	logger        *logger.Logger
 	mu            sync.Mutex
 	started       bool
 	startErr      error
-
-	idleMu         sync.Mutex
-	idleTimer      *time.Timer
-	idleGeneration uint64
-	active         int
-	stopping       bool
 }
 
-func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger, onIdle func(*Server)) *Server {
+func NewServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) *Server {
 	return &Server{
 		bin:           entry.Bin,
 		port:          entry.Port,
@@ -64,11 +59,34 @@ func NewServer(selector string, entry *config.LlamaCppEntry, server config.Serve
 		parallelSlots: max(entry.Slots, minParallelSlots),
 		slotContext:   entry.Ctx,
 		stopTimeout:   cmp.Or(entry.StopTimeout, defaultStopTimeout),
-		idleTimeout:   idleTimeoutDuration(server.IdleTimeout),
 		selector:      selector,
-		onIdle:        onIdle,
+		server:        server,
 		logger:        l,
 	}
+}
+
+func prepareServer(selector string, entry *config.LlamaCppEntry, server config.ServerConfig, l *logger.Logger) (*Server, error) {
+	if server.SaveSlotPath == "" || entry.Slots == 0 {
+		return NewServer(selector, entry, server, l), nil
+	}
+	dir, err := prepareSlotDir(server.SaveSlotPath)
+	if err != nil {
+		l.LogError("invalid slot save path", err)
+		return nil, fmt.Errorf("%w: %w", lane.ErrStartFailed, err)
+	}
+	srv := NewServer(selector, withSlotSavePath(entry, dir), server, l)
+	srv.slotDir = dir
+	return srv, nil
+}
+
+func runServer(ctx context.Context, supervisor *lane.Supervisor, cfg *config.Config, l *logger.Logger, selector string) (*lane.Lease[*Server], error) {
+	entry, err := cfg.GetLlamaCppEntry(selector)
+	if err != nil {
+		return nil, err
+	}
+	return lane.Run(ctx, supervisor, entry.Lane, selector, func() (*Server, error) {
+		return prepareServer(selector, entry, cfg.DefaultServer(), l)
+	})
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -143,9 +161,8 @@ func (s *Server) Start(ctx context.Context) error {
 	s.logger.Info("llama.cpp server ready", slog.String("addr", addr))
 
 	s.started = true
-
-	if s.startIdleTimer() {
-		s.logger.Info("llama.cpp server idle timeout", logger.Seconds("timeout", s.idleTimeout))
+	if s.slotDir != "" {
+		s.slots = newSlotCache(s.slotDir, s.selector, s.URL(), s.parallelSlots, s.server, s.logger, done)
 	}
 
 	return nil
@@ -190,11 +207,10 @@ func (s *Server) healthCheck(ctx context.Context, client *http.Client) (*http.Re
 	return client.Do(req)
 }
 
-func (s *Server) Stop() {
-	s.idleMu.Lock()
-	s.stopping = true
-	s.disarmIdleTimer()
-	s.idleMu.Unlock()
+func (s *Server) Stop(ctx context.Context) {
+	if slots := s.cachedSlots(); slots != nil {
+		slots.shutdown(ctx)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,76 +234,6 @@ func (s *Server) Stop() {
 	s.started = false
 }
 
-func (s *Server) EnterRequest() bool {
-	s.idleMu.Lock()
-	defer s.idleMu.Unlock()
-
-	if s.stopping {
-		return false
-	}
-	s.disarmIdleTimer()
-	s.active++
-	return true
-}
-
-func (s *Server) ExitRequest() {
-	s.idleMu.Lock()
-	defer s.idleMu.Unlock()
-
-	s.active--
-	if s.active > 0 || s.idleTimeout <= 0 || s.stopping {
-		return
-	}
-	s.armIdleTimer()
-}
-
-func (s *Server) startIdleTimer() bool {
-	if s.idleTimeout <= 0 {
-		return false
-	}
-	s.idleMu.Lock()
-	s.armIdleTimer()
-	s.idleMu.Unlock()
-	return true
-}
-
-func (s *Server) armIdleTimer() {
-	s.disarmIdleTimer()
-	generation := s.idleGeneration
-	s.idleTimer = time.AfterFunc(s.idleTimeout, func() {
-		s.stopIfIdle(generation)
-	})
-}
-
-func (s *Server) disarmIdleTimer() {
-	s.idleGeneration++
-	if s.idleTimer != nil {
-		s.idleTimer.Stop()
-		s.idleTimer = nil
-	}
-}
-
-func (s *Server) stopIfIdle(generation uint64) {
-	s.idleMu.Lock()
-	if generation != s.idleGeneration || s.active > 0 || s.stopping {
-		s.idleMu.Unlock()
-		return
-	}
-	s.stopping = true
-	s.idleTimer = nil
-	s.idleMu.Unlock()
-
-	s.logger.Info("stopping llama.cpp server after idle", logger.Seconds("timeout", s.idleTimeout))
-	s.onIdle(s)
-}
-
-func idleTimeoutDuration(seconds *int) time.Duration {
-	if seconds == nil {
-		return defaultIdleTimeout
-	}
-	return time.Duration(*seconds) * time.Second
-}
-
 func (s *Server) Exited() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -303,11 +249,11 @@ func (s *Server) Exited() bool {
 	}
 }
 
-func (s *Server) processDone() <-chan struct{} {
+func (s *Server) cachedSlots() *slotCache {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.done
+	return s.slots
 }
 
 func (s *Server) URL() string {

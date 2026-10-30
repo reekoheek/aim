@@ -4,12 +4,12 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,8 +18,113 @@ import (
 
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
+	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/strategy"
 )
+
+const fakeSupervisorCloseTimeout = 10 * time.Second
+
+var testLogger = logger.New("ERROR")
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func newFakeLlamaConfig(t *testing.T, idleTimeoutSeconds int, models ...string) *config.Config {
+	t.Helper()
+	t.Setenv(fakeLlamaServerEnv, fakeLlamaServerModeServe)
+	cfg := &config.Config{
+		Models: map[string]config.ModelEntry{},
+		Server: config.ServerConfig{
+			SaveSlotPath: t.TempDir(),
+			IdleTimeout:  &idleTimeoutSeconds,
+		},
+	}
+	for _, model := range models {
+		cfg.Models[model] = config.ModelEntry{
+			Type: "llama-server",
+			LlamaCpp: &config.LlamaCppEntry{
+				Lane:        config.DefaultLane,
+				Bin:         os.Args[0],
+				Port:        freePort(t),
+				StopTimeout: 2 * time.Second,
+				Slots:       1,
+			},
+		}
+	}
+	return cfg
+}
+
+func newTestSupervisor(t *testing.T, cfg *config.Config) *lane.Supervisor {
+	t.Helper()
+	supervisor := lane.NewSupervisor(cfg.DefaultServer().IdleTimeoutDuration(), testLogger)
+	t.Cleanup(func() {
+		closed := make(chan struct{})
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			supervisor.Close(ctx)
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(fakeSupervisorCloseTimeout):
+			t.Error("supervisor close did not finish")
+		}
+	})
+	return supervisor
+}
+
+func currentServer(supervisor *lane.Supervisor) *Server {
+	return serverOnLane(supervisor, config.DefaultLane)
+}
+
+func serverOnLane(supervisor *lane.Supervisor, laneName string) *Server {
+	running := supervisor.Lane(laneName)
+	if running == nil {
+		return nil
+	}
+	srv, _ := running.Process().(*Server)
+	return srv
+}
+
+func currentSlots(supervisor *lane.Supervisor) *slotCache {
+	srv := currentServer(supervisor)
+	if srv == nil {
+		return nil
+	}
+	return srv.cachedSlots()
+}
+
+func receiveWithin[T any](t *testing.T, ch <-chan T, timeout time.Duration, what string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(timeout):
+		t.Fatalf("%s did not finish within %v", what, timeout)
+		var zero T
+		return zero
+	}
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for !condition() {
+		select {
+		case <-deadline:
+			t.Fatalf("%s did not happen within %v", what, timeout)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
 
 func TestFlagArgs(t *testing.T) {
 	tests := []struct {
@@ -148,7 +253,7 @@ func TestServerArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", tt.entry, config.ServerConfig{}, nil, nil).args()
+			got := NewServer("m", tt.entry, config.ServerConfig{}, nil).args()
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
@@ -158,7 +263,7 @@ func TestServerArgs(t *testing.T) {
 
 func TestServerArgsCannotBeConfiguredAsFlags(t *testing.T) {
 	entry := withSlotSavePath(&config.LlamaCppEntry{Port: 12345, Slots: 1, Ctx: 4096}, "/slots")
-	for _, arg := range NewServer("m", entry, config.ServerConfig{}, nil, nil).args() {
+	for _, arg := range NewServer("m", entry, config.ServerConfig{}, nil).args() {
 		if !strings.HasPrefix(arg, "-") {
 			continue
 		}
@@ -187,7 +292,7 @@ func TestNewServerStopTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil, nil).stopTimeout
+			got := NewServer("m", &config.LlamaCppEntry{StopTimeout: tt.stopTimeout}, config.ServerConfig{}, nil).stopTimeout
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
@@ -195,197 +300,135 @@ func TestNewServerStopTimeout(t *testing.T) {
 	}
 }
 
-func TestHelperProcess(t *testing.T) {
-	if os.Getenv("AIM_TEST_HELPER_PROCESS") != "1" {
-		return
-	}
-	time.Sleep(time.Minute)
-	os.Exit(0)
-}
-
-func startHelperProcess(t *testing.T, srv *Server) {
-	t.Helper()
-	srv.cmd = exec.Command(os.Args[0], "-test.run=^TestHelperProcess$")
-	srv.cmd.Env = append(os.Environ(), "AIM_TEST_HELPER_PROCESS=1")
-	if err := srv.cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	srv.done = done
-	go func() {
-		srv.cmd.Wait()
-		close(done)
-	}()
-}
-
-func stopOnIdle(srv *Server) {
-	srv.Stop()
-}
-
-func newIdleTestServer(t *testing.T, idleTimeout time.Duration) *Server {
-	t.Helper()
-	return newIdleTestServerNotifying(t, idleTimeout, stopOnIdle)
-}
-
-func newIdleTestServerNotifying(t *testing.T, idleTimeout time.Duration, onIdle func(*Server)) *Server {
-	t.Helper()
-	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{}, logger.New("ERROR"), onIdle)
-	srv.idleTimeout = idleTimeout
-	startHelperProcess(t, srv)
-	t.Cleanup(func() { srv.cmd.Process.Kill() })
-	return srv
-}
-
-func expectRunningFor(t *testing.T, srv *Server, duration time.Duration, what string) {
-	t.Helper()
-	select {
-	case <-time.After(duration):
-	case <-srv.done:
-		t.Fatalf("server stopped %s", what)
-	}
-}
-
-func TestIdleTimeoutArmsAndFires(t *testing.T) {
-	srv := newIdleTestServer(t, 200*time.Millisecond)
-
-	if !srv.startIdleTimer() {
-		t.Fatal("startIdleTimer reported no timer armed")
-	}
-
-	waitUntil(t, 2*time.Second, "idle stop", srv.Exited)
-}
-
-func TestIdleTimeoutDisabledWhenZero(t *testing.T) {
-	srv := newIdleTestServer(t, 0)
-
-	if srv.startIdleTimer() {
-		t.Fatal("startIdleTimer armed with idle timeout 0")
-	}
-	srv.EnterRequest()
-	srv.ExitRequest()
-	expectRunningFor(t, srv, 300*time.Millisecond, "with idle timeout disabled")
-}
-
-func TestEnterRequestCancelsIdleTimer(t *testing.T) {
-	srv := newIdleTestServer(t, 200*time.Millisecond)
-	srv.startIdleTimer()
-
-	srv.EnterRequest()
-	expectRunningFor(t, srv, 400*time.Millisecond, "while a request was in flight")
-
-	srv.ExitRequest()
-	waitUntil(t, 2*time.Second, "idle stop after the request exited", srv.Exited)
-}
-
-func TestExitRequestWaitsUntilAllRequestsDone(t *testing.T) {
-	srv := newIdleTestServer(t, 200*time.Millisecond)
-	srv.startIdleTimer()
-
-	srv.EnterRequest()
-	srv.EnterRequest()
-	srv.ExitRequest()
-	expectRunningFor(t, srv, 400*time.Millisecond, "while a request was still in flight")
-
-	srv.ExitRequest()
-	waitUntil(t, 2*time.Second, "idle stop after the last request exited", srv.Exited)
-}
-
-func TestStopIfIdle(t *testing.T) {
+func TestPrepareServerSetsUpSlotsFromSlotCount(t *testing.T) {
 	tests := []struct {
-		name     string
-		prepare  func(srv *Server) uint64
-		wantStop bool
+		name           string
+		slots          int
+		saveSlotPath   bool
+		wantParallel   string
+		wantSavePath   bool
+		wantCacheSlots int
 	}{
-		{
-			name: "current timer stops an idle server",
-			prepare: func(srv *Server) uint64 {
-				srv.startIdleTimer()
-				return srv.idleGeneration
-			},
-			wantStop: true,
-		},
-		{
-			name: "timer replaced by a later request is ignored",
-			prepare: func(srv *Server) uint64 {
-				srv.startIdleTimer()
-				stale := srv.idleGeneration
-				srv.EnterRequest()
-				srv.ExitRequest()
-				return stale
-			},
-			wantStop: false,
-		},
-		{
-			name: "timer disarmed by an in-flight request is ignored",
-			prepare: func(srv *Server) uint64 {
-				srv.startIdleTimer()
-				stale := srv.idleGeneration
-				srv.EnterRequest()
-				return stale
-			},
-			wantStop: false,
-		},
+		{name: "one slot", slots: 1, saveSlotPath: true, wantParallel: "1", wantSavePath: true, wantCacheSlots: 1},
+		{name: "several slots", slots: 3, saveSlotPath: true, wantParallel: "3", wantSavePath: true, wantCacheSlots: 3},
+		{name: "zero slots turn the slot cache off", slots: 0, saveSlotPath: true, wantParallel: "1", wantSavePath: false, wantCacheSlots: 0},
+		{name: "slots without a slot save path stay parallel", slots: 2, saveSlotPath: false, wantParallel: "2", wantSavePath: false, wantCacheSlots: 0},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := newIdleTestServer(t, time.Hour)
-			srv.stopIfIdle(tt.prepare(srv))
-			if got := srv.Exited(); got != tt.wantStop {
-				t.Errorf("stopped %v, want %v", got, tt.wantStop)
+			cfg := newFakeLlamaConfig(t, 0, "a")
+			entry := cfg.Models["a"].LlamaCpp
+			entry.Slots = tt.slots
+			server := cfg.DefaultServer()
+			if !tt.saveSlotPath {
+				server.SaveSlotPath = ""
+			}
+
+			srv, err := prepareServer("a", entry, server, testLogger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := srv.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			defer srv.Stop(context.Background())
+
+			args := srv.args()
+			if got := argValue(args, "-np"); got != tt.wantParallel {
+				t.Errorf("-np %q, want %q", got, tt.wantParallel)
+			}
+			if got := slices.Contains(args, slotSavePathFlag); got != tt.wantSavePath {
+				t.Errorf("passes %s %v, want %v", slotSavePathFlag, got, tt.wantSavePath)
+			}
+			cacheSlots := 0
+			if slots := srv.cachedSlots(); slots != nil {
+				cacheSlots = len(slots.slots)
+			}
+			if cacheSlots != tt.wantCacheSlots {
+				t.Errorf("slot cache with %d slots, want %d", cacheSlots, tt.wantCacheSlots)
 			}
 		})
 	}
 }
 
-func TestStopDisarmsIdleTimerAndRejectsRequests(t *testing.T) {
-	srv := newIdleTestServer(t, time.Hour)
-	srv.startIdleTimer()
-
-	srv.Stop()
-
-	if srv.idleTimer != nil {
-		t.Error("idle timer still armed after Stop")
+func TestPrepareServerRejectsUnusableSlotSavePath(t *testing.T) {
+	cfg := newFakeLlamaConfig(t, 0, "a")
+	server := cfg.DefaultServer()
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if srv.EnterRequest() {
-		t.Error("EnterRequest accepted a request on a stopped server")
-	}
-}
+	server.SaveSlotPath = filepath.Join(blocker, "slots")
 
-func TestIdleTimeoutLeavesStopToOnIdle(t *testing.T) {
-	idled := make(chan *Server, 1)
-	srv := newIdleTestServerNotifying(t, 200*time.Millisecond, func(srv *Server) { idled <- srv })
-	srv.startIdleTimer()
-
-	if got := receiveWithin(t, idled, 2*time.Second, "idle notification"); got != srv {
-		t.Errorf("onIdle received %p, want %p", got, srv)
-	}
-	expectRunningFor(t, srv, 300*time.Millisecond, "without onIdle stopping it")
-	if srv.EnterRequest() {
-		t.Error("EnterRequest accepted a request on a server reported idle")
+	if _, err := prepareServer("a", cfg.Models["a"].LlamaCpp, server, testLogger); !errors.Is(err, lane.ErrStartFailed) {
+		t.Errorf("error %v, want %v", err, lane.ErrStartFailed)
 	}
 }
 
-func TestEnterRequestRejectedOnceIdleStopBegins(t *testing.T) {
-	srv := newIdleTestServer(t, time.Hour)
-	srv.startIdleTimer()
-	generation := srv.idleGeneration
-
-	stopped := make(chan struct{})
-	go func() {
-		srv.stopIfIdle(generation)
-		close(stopped)
-	}()
-	waitUntil(t, 2*time.Second, "idle stop to begin", func() bool {
-		srv.idleMu.Lock()
-		defer srv.idleMu.Unlock()
-		return srv.stopping
-	})
-
-	if srv.EnterRequest() {
-		t.Error("EnterRequest accepted a request on a server stopping after idle")
+func TestStopSavesUnsavedSlots(t *testing.T) {
+	cfg := newFakeLlamaConfig(t, 0, "a")
+	srv, err := prepareServer("a", cfg.Models["a"].LlamaCpp, cfg.DefaultServer(), testLogger)
+	if err != nil {
+		t.Fatal(err)
 	}
-	receiveWithin(t, stopped, 5*time.Second, "idle stop")
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	slots := srv.cachedSlots()
+	_, release, err := slots.acquire(context.Background(), "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	srv.Stop(context.Background())
+
+	if !srv.Exited() {
+		t.Error("server still running after Stop")
+	}
+	if _, err := os.Stat(filepath.Join(slots.dir, slots.file("session"))); err != nil {
+		t.Errorf("slot not saved on stop: %v", err)
+	}
+}
+
+func TestRunServerUsesModelLane(t *testing.T) {
+	tests := []struct {
+		name         string
+		lanes        map[string]string
+		wantFirstRun bool
+	}{
+		{name: "models on the same lane swap", lanes: map[string]string{"a": "gpu", "b": "gpu"}, wantFirstRun: false},
+		{name: "models on different lanes run together", lanes: map[string]string{"a": "gpu", "b": "cpu"}, wantFirstRun: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newFakeLlamaConfig(t, 0, "a", "b")
+			for model, laneName := range tt.lanes {
+				cfg.Models[model].LlamaCpp.Lane = laneName
+			}
+			supervisor := newTestSupervisor(t, cfg)
+
+			first, err := runServer(context.Background(), supervisor, cfg, testLogger, "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			first.Release()
+			second, err := runServer(context.Background(), supervisor, cfg, testLogger, "b")
+			if err != nil {
+				t.Fatal(err)
+			}
+			second.Release()
+
+			if running := !first.Process.Exited(); running != tt.wantFirstRun {
+				t.Errorf("first server running %v, want %v", running, tt.wantFirstRun)
+			}
+			if got := serverOnLane(supervisor, tt.lanes["b"]); got != second.Process {
+				t.Errorf("lane %q holds %v, want the second server", tt.lanes["b"], got)
+			}
+		})
+	}
 }
 
 func TestStartAbortsWhenContextCanceled(t *testing.T) {
@@ -399,7 +442,7 @@ func TestStartAbortsWhenContextCanceled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(fakeLlamaServerEnv, tt.mode)
-			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{}, logger.New("ERROR"), nil)
+			srv := NewServer("m", &config.LlamaCppEntry{Bin: os.Args[0], Port: freePort(t)}, config.ServerConfig{}, testLogger)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -416,41 +459,6 @@ func TestStartAbortsWhenContextCanceled(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestIdleTimeoutDuration(t *testing.T) {
-	seconds := func(value int) *int { return &value }
-	tests := []struct {
-		name    string
-		seconds *int
-		want    time.Duration
-	}{
-		{"unset uses default", nil, defaultIdleTimeout},
-		{"zero disables", seconds(0), 0},
-		{"configured", seconds(300), 300 * time.Second},
-		{"one second", seconds(1), time.Second},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := idleTimeoutDuration(tt.seconds); got != tt.want {
-				t.Errorf("idleTimeoutDuration = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNewServerIdleTimeoutZeroNeverStops(t *testing.T) {
-	disabled := 0
-	srv := NewServer("m", &config.LlamaCppEntry{StopTimeout: time.Second}, config.ServerConfig{IdleTimeout: &disabled}, logger.New("ERROR"), nil)
-	startHelperProcess(t, srv)
-	t.Cleanup(func() { srv.cmd.Process.Kill() })
-
-	if srv.startIdleTimer() {
-		t.Fatal("startIdleTimer armed with idle_timeout 0")
-	}
-	srv.EnterRequest()
-	srv.ExitRequest()
-	expectRunningFor(t, srv, 300*time.Millisecond, "with idle_timeout 0")
 }
 
 const (
