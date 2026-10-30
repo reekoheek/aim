@@ -40,3 +40,7 @@ Supported targets: **Linux**, **macOS**, and **Windows** — all native.
 ## Documentation
 
 - README.md - start here for an overview of the project, features, and setup instructions
+
+## GitHub issues
+
+- Create issues from `.github/ISSUE_TEMPLATE/feature.md`: keep its title prefix, labels and section headings (User story, Background, Acceptance criteria as one flat `- [ ]` list without sub-headings, Out of scope). Write the user story on at least three lines starting with bold `**As a**`, `**I want**` and `**So that**`; end the `As a` and `I want` lines with a comma and the last line with a period. Number acceptance criteria `**AC1**`, `**AC2**`, … sequentially so they can be referenced in commits, PRs and tests. Out-of-scope items are not numbered; link the follow-up issue (`#N`) when one exists.
