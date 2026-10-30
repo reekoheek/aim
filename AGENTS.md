@@ -8,11 +8,11 @@ Guidance for AI agents working in this repository.
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
-| Presentation | `cmd/aim-server/` | CLI commands, server orchestration, user-facing entry point |
+| Presentation | `cmd/aim/` | CLI commands, server orchestration, user-facing entry point |
 | Application (use case) | `internal/` | Orchestrates domain components into application flows (opinionated, not reusable across projects) |
 | Domain | `pkg/` | Domain models, entities, value objects, and interfaces (shared, reusable, framework-agnostic) |
 
-Domain models live in `pkg/`. Application layer (use cases) lives in `internal/`. Infrastructure concerns (persistence, external integrations) also live in `internal/`. Presentation layer is `cmd/aim-server/`.
+Domain models live in `pkg/`. Application layer (use cases) lives in `internal/`. Infrastructure concerns (persistence, external integrations) also live in `internal/`. Presentation layer is `cmd/aim/`.
 
 ## Platform support
 

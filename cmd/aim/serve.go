@@ -24,32 +24,26 @@ import (
 	"github.com/reekoheek/aim/pkg/strategy/llamaserver"
 )
 
-var (
-	cfgFile string
-	version = "dev"
-)
+type serveFunc func(cfgFile string) error
 
-func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		os.Exit(1)
-	}
-}
+func newServeCmd(serveRunner serveFunc) *cobra.Command {
+	var cfgFile string
 
-func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "aim-server",
-		Short: "aim — an AI Management Server",
-		Long:  "aim is a lightweight AI management server that forwards requests to supported APIs and llama.cpp server.",
-		RunE:  run,
+		Use:   "serve",
+		Short: "Start the aim server",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return serveRunner(cfgFile)
+		},
 	}
 
 	cmd.Flags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: .aim.yaml in CWD)")
-	cmd.Version = version
 
 	return cmd
 }
 
-func run(cmd *cobra.Command, args []string) error {
+func serve(cfgFile string) error {
 	l := logger.New(os.Getenv("AIM_LOG_LEVEL"))
 
 	var cfgPath string

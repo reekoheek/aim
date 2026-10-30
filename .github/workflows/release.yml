@@ -46,20 +46,20 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p dist
-          archive="aim-server_${VERSION}_${GOOS}_${GOARCH}"
+          archive="aim_${VERSION}_${GOOS}_${GOARCH}"
           if [ "${GOOS}" = windows ]; then
-            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/aim-server.exe ./cmd/aim-server
-            (cd dist && zip -q "${archive}.zip" aim-server.exe && rm aim-server.exe)
+            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/aim.exe ./cmd/aim
+            (cd dist && zip -q "${archive}.zip" aim.exe && rm aim.exe)
           else
-            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/aim-server ./cmd/aim-server
-            tar -C dist -czf "dist/${archive}.tar.gz" aim-server
-            rm dist/aim-server
+            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o dist/aim ./cmd/aim
+            tar -C dist -czf "dist/${archive}.tar.gz" aim
+            rm dist/aim
           fi
 
       - uses: actions/upload-artifact@v5
         with:
-          name: aim-server_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: dist/aim-server_*
+          name: aim_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/aim_*
           if-no-files-found: error
 
   release:
@@ -73,7 +73,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum aim-server_* > SHA256SUMS.txt
+        run: cd dist && sha256sum aim_* > SHA256SUMS.txt
 
       - name: Create release
         env:
@@ -84,4 +84,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${VERSION}" \
             --generate-notes \
-            dist/aim-server_* dist/SHA256SUMS.txt
+            dist/aim_* dist/SHA256SUMS.txt

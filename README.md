@@ -5,9 +5,18 @@ AI Management Server — lightweight LLM proxy with multi-model support. Forward
 ## Quick Start
 
 ```bash
-go build -o bin/aim-server ./cmd/aim-server/
-./bin/aim-server          # loads .aim.yaml from CWD
-./bin/aim-server -c path/to/config.yaml
+make build                       # or: go build -o bin/aim ./cmd/aim/
+./bin/aim serve                  # loads .aim.yaml from CWD
+./bin/aim serve -c path/to/config.yaml
+```
+
+### Migrating from `aim-server`
+
+The `aim-server` binary is now `aim`, and the server is started by the `serve` subcommand. Running `aim` without a subcommand only prints help. Update any systemd unit accordingly:
+
+```diff
+-ExecStart=/path/to/aim-server -c /path/to/config.yaml
++ExecStart=/path/to/aim serve -c /path/to/config.yaml
 ```
 
 ## Configuration
@@ -199,19 +208,27 @@ response = client.chat.completions.create(model="banyu-minipc/qwen3.6-35b", mess
 
 Native support for **Linux**, **macOS**, and **Windows**. Pure Go, no `cgo`, no OS-specific dependencies.
 
-## CLI Flags
+## CLI
+
+| Command | Description |
+|---------|-------------|
+| `aim serve` | Start the server |
+| `aim --version` | Show version |
+| `aim --help` | Show help |
+
+`aim serve` flags:
 
 | Flag | Description |
 |------|-------------|
 | `-c, --config` | Config file path (default: `.aim.yaml` in CWD) |
-| `-v, --version` | Show version |
 | `-h, --help` | Show help |
 
 ## Structure
 
 ```
 aim/
-├── cmd/aim-server/main.go          # Entry point
+├── cmd/aim/main.go                 # Root command
+├── cmd/aim/serve.go                # `aim serve` command
 ├── pkg/config/config.go            # YAML config loader
 ├── pkg/proxy/proxy.go              # HTTP handler + streaming
 └── internal/logger/logger.go       # Logging utility
