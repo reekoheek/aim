@@ -46,7 +46,7 @@ func TestNewRootCmd(t *testing.T) {
 			cmd := newRootCmd(func(cfgFile string) error {
 				serveCalled = true
 				return nil
-			})
+			}, backendDependencies{})
 			var output bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&output)

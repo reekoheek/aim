@@ -9,12 +9,12 @@ import (
 var version = "dev"
 
 func main() {
-	if err := newRootCmd(serve).Execute(); err != nil {
+	if err := newRootCmd(serve, defaultBackendDependencies()).Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func newRootCmd(serveRunner serveFunc) *cobra.Command {
+func newRootCmd(serveRunner serveFunc, dependencies backendDependencies) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "aim",
 		Short:   "aim — an AI Management Server",
@@ -22,7 +22,7 @@ func newRootCmd(serveRunner serveFunc) *cobra.Command {
 		Version: version,
 	}
 
-	cmd.AddCommand(newServeCmd(serveRunner))
+	cmd.AddCommand(newServeCmd(serveRunner), newBackendCmd(dependencies))
 
 	return cmd
 }

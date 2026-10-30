@@ -61,7 +61,7 @@ func TestNewServeCmd(t *testing.T) {
 				called = true
 				gotCfgFile = cfgFile
 				return tt.serveErr
-			})
+			}, backendDependencies{})
 			var output bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&output)

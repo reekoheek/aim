@@ -213,6 +213,7 @@ Native support for **Linux**, **macOS**, and **Windows**. Pure Go, no `cgo`, no 
 | Command | Description |
 |---------|-------------|
 | `aim serve` | Start the server |
+| `aim backend <llama.cpp\|sd.cpp> <ls\|add\|use\|rm>` | Manage prebuilt backends (see [Backends](#backends)) |
 | `aim --version` | Show version |
 | `aim --help` | Show help |
 
@@ -223,12 +224,70 @@ Native support for **Linux**, **macOS**, and **Windows**. Pure Go, no `cgo`, no 
 | `-c, --config` | Config file path (default: `.aim.yaml` in CWD) |
 | `-h, --help` | Show help |
 
+## Backends
+
+`aim backend` adds, lists, switches and removes prebuilt [llama.cpp](https://github.com/ggml-org/llama.cpp) and [sd.cpp](https://github.com/leejet/stable-diffusion.cpp) (stable-diffusion.cpp) releases from GitHub. Backend names are the upstream project names; there are no aliases.
+
+```sh
+aim backend llama.cpp add                       # newest stable, variant of the active build or vulkan
+aim backend llama.cpp add b6500 --variant rocm
+aim backend llama.cpp add v1.2.3 --dry-run      # prints the resolved asset URL only
+aim backend sd.cpp add 412 --variant cpu        # master-412-<sha>
+aim backend llama.cpp ls                        # installed builds + upstream releases
+aim backend llama.cpp ls -l                     # local only, no network
+aim backend llama.cpp use 2                     # by ls index, version or folder name; no arg = menu
+aim backend llama.cpp rm b6400 -y
+```
+
+Versions:
+
+| Backend | `latest` / no version | `dev` / `nightly` | Specific |
+|---------|-----------------------|-------------------|----------|
+| llama.cpp | newest stable `vX.Y.Z`, resolved to its `bNNNNN` build through `nightly-tag.txt` | newest `bNNNNN` | `vX.Y.Z` (or `X.Y.Z`), `bNNNNN` (or `NNNNN`) |
+| sd.cpp | newest `master-NNNN-<sha>` | same as `latest` | `master-NNNN-<sha>` or `NNNN` |
+
+`--variant` picks the prebuilt: `vulkan`, `rocm`, `cpu`, `cuda` for both, `sycl` for llama.cpp and `metal` on macOS. Without it `add` keeps the variant of the active build, or uses `vulkan` (`metal` on macOS) when nothing is active. When upstream publishes several ROCm/CUDA versions the newest one is picked. When a tag has no asset for the variant on your OS/arch, the error lists the newest tags that do. Windows CUDA builds also need upstream's separate `cudart-*` archive, which `aim backend` does not install.
+
+| Subcommand | Flags |
+|------------|-------|
+| `ls` | `-n N` upstream builds to show (default 10), `-a/--all` (40), `-l/--local` installed only, no network |
+| `add [VERSION]` | `--variant`, `-f/--force` re-download, `--dry-run`, `--no-use` don't switch, `--keep N` builds of the same variant to keep (default 3, `0` = never prune) |
+| `use [VERSION\|INDEX\|FOLDER]` | none; without an argument shows a menu. When a version matches builds of several variants, the error lists them with their index and folder name |
+| `rm VERSION\|INDEX\|FOLDER...` | `-y/--yes`; without it asks for confirmation, and fails when stdin is not a terminal. The active build is never deleted |
+
+Layout:
+
+```
+<user data dir>/
+  llama.cpp/
+    b6500-vulkan/        llama-server, libggml-*.so, .aim-stamp
+    b6400-vulkan/
+    current -> b6500-vulkan
+  sd.cpp/
+    master-412-abc123-vulkan/
+    current -> master-412-abc123-vulkan
+~/.local/bin/llama-server -> <root>/llama.cpp/current/llama-server
+~/.local/bin/sd-server    -> <root>/sd.cpp/current/sd-server
+```
+
+- The user data dir is `$XDG_DATA_HOME` or `~/.local/share` on Linux, `~/Library/Application Support` on macOS and `%LocalAppData%` on Windows. Each backend has its own root and `current`, so the `libggml-*.so` files of the two never mix.
+- `--root` (or `AIM_LLAMA_CPP_ROOT` / `AIM_SD_CPP_ROOT`) points a backend at another root. The default llama.cpp root on Linux (`~/.local/share/llama.cpp`) is the same folder `llama-manager` uses, so its `llama-bNNNNN-<variant>` builds are listed and switchable as-is.
+- Downloads are staged inside the root (never the system temp dir), extracted, checked for the main binary and then renamed into place. `add` prunes older builds of the same variant down to `--keep`, but never the active build or folders it did not install.
+- On Linux and macOS only the backend's own binaries (`llama-server`, `llama-cli`, … / `sd-server`, `sd-cli`) are symlinked into the bin dir (`--bin-dir`, `AIM_BIN_DIR`, default `~/.local/bin`) through `current`; scripts and shared libraries are not. Stale links are removed only when they point into the same backend's root, and real files are never replaced.
+- On Windows `current` is a plain file naming the active folder (no symlink privileges needed), and `add`/`use` print the binary path to put in `bin`.
+- `GITHUB_TOKEN` or `GH_TOKEN` is sent to the GitHub API when set, which raises the rate limit.
+
+Nothing is restarted. A `llama-server` model's `bin` defaults to `llama-server` from `PATH`, so `aim serve` uses the new build the next time it starts the lane. Under systemd `~/.local/bin` is usually not on `PATH`: set `bin` to an absolute path (e.g. `/home/me/.local/bin/llama-server` or `<root>/llama.cpp/current/llama-server`), or add `Environment=PATH=/home/me/.local/bin:/usr/bin:/bin` to the unit.
+
 ## Structure
 
 ```
 aim/
 ├── cmd/aim/main.go                 # Root command
 ├── cmd/aim/serve.go                # `aim serve` command
+├── cmd/aim/backend.go              # `aim backend` command
+├── pkg/backend/                    # Backend descriptors (llama.cpp, sd.cpp)
+├── internal/manager/               # Backend add/ls/use/rm
 ├── pkg/config/config.go            # YAML config loader
 ├── pkg/proxy/proxy.go              # HTTP handler + streaming
 └── internal/logger/logger.go       # Logging utility
