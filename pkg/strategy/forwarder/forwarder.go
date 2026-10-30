@@ -85,11 +85,6 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 	}
 
 	f.logger.LogResponse(httpResp.StatusCode, time.Since(start))
-	f.logger.Info("response body",
-		slog.Int("status", httpResp.StatusCode),
-		slog.Int("body_len", len(body)),
-		slog.String("body", string(body)),
-	)
 
 	copyResponseHeaders(w.Header(), httpResp.Header)
 	w.WriteHeader(httpResp.StatusCode)

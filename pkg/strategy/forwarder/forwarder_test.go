@@ -1,8 +1,10 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -101,6 +103,40 @@ func TestForward(t *testing.T) {
 			}
 			if tt.wantContentType == "application/json" && !json.Valid(recorder.Body.Bytes()) {
 				t.Errorf("body %s is not valid JSON", recorder.Body)
+			}
+		})
+	}
+}
+
+func TestForwardLogsResponseWithoutBody(t *testing.T) {
+	const upstreamBody = `{"secret_marker":"response content"}`
+
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "non-stream response", stream: false},
+		{name: "stream response", stream: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(upstreamBody))
+			}))
+			t.Cleanup(upstream.Close)
+
+			var logs bytes.Buffer
+			debugLogger := &logger.Logger{Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+
+			req := &strategy.Request{Stream: tt.stream, Body: []byte(`{}`)}
+			New(&http.Client{}, debugLogger).Forward(context.Background(), httptest.NewRecorder(), req, upstream.URL, nil)
+
+			if got := strings.Count(logs.String(), "msg=response"); got != 1 {
+				t.Errorf("logged %d response entries, want 1: %s", got, logs.String())
+			}
+			if strings.Contains(logs.String(), "secret_marker") {
+				t.Errorf("logs contain response body: %s", logs.String())
 			}
 		})
 	}
