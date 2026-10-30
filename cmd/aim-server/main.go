@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/reekoheek/aim/internal/cors"
 	"github.com/reekoheek/aim/internal/logger"
 	"github.com/reekoheek/aim/pkg/config"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
@@ -95,13 +96,17 @@ func run(cmd *cobra.Command, args []string) error {
 
 	server := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: cors.New(serverCfg.CORSOrigins, mux),
 	}
 
 	l.Info("starting server",
 		slog.String("addr", addr),
 		slog.String("config", cfgPath),
 	)
+
+	if len(serverCfg.CORSOrigins) > 0 {
+		l.Info("cors enabled", slog.Any("origins", serverCfg.CORSOrigins))
+	}
 
 	absPath, _ := filepath.Abs(cfgPath)
 	l.Info("config loaded", slog.String("path", absPath))

@@ -91,9 +91,12 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 	w.Write(body)
 }
 
+const corsHeaderPrefix = "access-control-"
+
 func copyResponseHeaders(dst http.Header, src http.Header) {
 	for k, values := range src {
-		if hopByHop[strings.ToLower(k)] {
+		name := strings.ToLower(k)
+		if hopByHop[name] || strings.HasPrefix(name, corsHeaderPrefix) {
 			continue
 		}
 		for _, v := range values {

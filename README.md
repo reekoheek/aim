@@ -51,7 +51,11 @@ server:
   slot_expiration: 1h                  # optional, default: 1h
   slot_max_files: 3                    # optional, default: 3
   idle_timeout: 300                    # optional, seconds of inactivity before aim stops llama-server (default 300 = 5m, 0 = never)
+  cors_origins:                        # optional, browser origins allowed to call aim (default: none, CORS off)
+    - http://localhost:3000
 ```
+
+`cors_origins` turns on CORS for browser clients. Each entry is an exact origin (`scheme://host[:port]`, no path or trailing slash) or `*` for any origin; anything else stops aim at startup. A request from a listed origin gets `Access-Control-Allow-Origin`, and its `OPTIONS` preflight is answered by aim (methods `POST, OPTIONS`, the requested headers allowed, cached for 10 minutes). Credentials are never allowed. Without `cors_origins` (or with an empty list) aim sends no CORS headers and preflights get `405`, so browsers on other origins are blocked. `Access-Control-*` headers from upstreams (including llama-server) are never passed through.
 
 Each llama-server model runs with `slots` KV cache slots (see below). A session (the `X-Session-Affinity` header, else Claude Code's `X-Claude-Code-Session-Id`; requests with neither share one session; a request that also carries Claude Code's `X-Claude-Code-Agent-Id` is a session of its own, so each subagent gets its own slot) keeps its slot while it is in use. A session that has no slot takes an empty one, or else the least recently used free slot: that slot's session is saved as a `.bin` file under `save_slot_path`, and the incoming session is restored from its file. Every unsaved slot is also saved when llama-server stops. Requests wait while every slot is busy; a request whose session already holds a busy slot waits for that slot and is served before other waiting requests. A file counts as used when it is saved or when its session is requested again:
 

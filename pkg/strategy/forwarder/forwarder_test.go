@@ -234,7 +234,7 @@ func TestForwardResponseHeaders(t *testing.T) {
 		want   http.Header
 	}{
 		{
-			name: "end-to-end headers are copied",
+			name: "end-to-end headers are copied, upstream cors headers are not",
 			want: http.Header{
 				"Request-Id":                         {"req_1"},
 				"Retry-After":                        {"7"},
@@ -243,16 +243,19 @@ func TestForwardResponseHeaders(t *testing.T) {
 				"X-Request-Id":                       {"abc"},
 				"Content-Type":                       {"application/json"},
 				"Proxy-Authenticate":                 nil,
+				"Access-Control-Allow-Origin":        nil,
+				"Access-Control-Allow-Credentials":   nil,
 			},
 		},
 		{
 			name:   "streamed response keeps end-to-end headers",
 			stream: true,
 			want: http.Header{
-				"Request-Id":         {"req_1"},
-				"Retry-After":        {"7"},
-				"Content-Type":       {"text/event-stream"},
-				"Proxy-Authenticate": nil,
+				"Request-Id":                  {"req_1"},
+				"Retry-After":                 {"7"},
+				"Content-Type":                {"text/event-stream"},
+				"Proxy-Authenticate":          nil,
+				"Access-Control-Allow-Origin": nil,
 			},
 		},
 	}
@@ -266,6 +269,8 @@ func TestForwardResponseHeaders(t *testing.T) {
 				w.Header().Set("Anthropic-Ratelimit-Requests-Limit", "50")
 				w.Header().Set("X-Request-Id", "abc")
 				w.Header().Set("Proxy-Authenticate", "Basic")
+				w.Header().Set("Access-Control-Allow-Origin", "localhost")
+				w.Header().Set("Access-Control-Allow-Credentials", "false")
 				w.Header().Set("Content-Type", "application/json")
 				w.Write([]byte(`{}`))
 			}))

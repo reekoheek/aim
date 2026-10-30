@@ -719,6 +719,106 @@ server:
 	}
 }
 
+func TestLoadCORSOrigins(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    []string
+		wantErr string
+	}{
+		{
+			name: "absent leaves cors off",
+			yaml: "",
+			want: nil,
+		},
+		{
+			name: "empty list leaves cors off",
+			yaml: `
+server:
+  cors_origins: []
+`,
+			want: []string{},
+		},
+		{
+			name: "origins and wildcard",
+			yaml: `
+server:
+  cors_origins:
+    - http://localhost:3000
+    - https://chat.example.com
+    - "*"
+`,
+			want: []string{"http://localhost:3000", "https://chat.example.com", "*"},
+		},
+		{
+			name: "trailing slash",
+			yaml: `
+server:
+  cors_origins: [http://localhost:3000/]
+`,
+			wantErr: `cors_origins entry "http://localhost:3000/"`,
+		},
+		{
+			name: "path",
+			yaml: `
+server:
+  cors_origins: [https://example.com/app]
+`,
+			wantErr: `cors_origins entry "https://example.com/app"`,
+		},
+		{
+			name: "missing scheme",
+			yaml: `
+server:
+  cors_origins: [localhost:3000]
+`,
+			wantErr: `cors_origins entry "localhost:3000"`,
+		},
+		{
+			name: "unsupported scheme",
+			yaml: `
+server:
+  cors_origins: [ftp://example.com]
+`,
+			wantErr: `cors_origins entry "ftp://example.com"`,
+		},
+		{
+			name: "query",
+			yaml: `
+server:
+  cors_origins: ["https://example.com?x=1"]
+`,
+			wantErr: `cors_origins entry "https://example.com?x=1"`,
+		},
+		{
+			name: "empty entry",
+			yaml: `
+server:
+  cors_origins: [""]
+`,
+			wantErr: `cors_origins entry ""`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := cfg.DefaultServer().CORSOrigins; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveModel(t *testing.T) {
 	tests := []struct {
 		name     string

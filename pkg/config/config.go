@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,7 @@ const (
 	defaultIdleTimeout    = 5 * time.Minute
 	defaultLlamaServerURL = "http://127.0.0.1:%d"
 	defaultSlots          = 1
+	anyCORSOrigin         = "*"
 )
 
 const (
@@ -114,6 +116,7 @@ type ServerConfig struct {
 	SlotExpiration time.Duration `yaml:"slot_expiration"`
 	SlotMaxFiles   int           `yaml:"slot_max_files"`
 	IdleTimeout    *int          `yaml:"idle_timeout"`
+	CORSOrigins    []string      `yaml:"cors_origins"`
 }
 
 type Config struct {
@@ -224,6 +227,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 
+	if err := validateCORSOrigins(cfg.Server.CORSOrigins); err != nil {
+		return nil, err
+	}
+
 	if cfg.Models == nil {
 		cfg.Models = make(map[string]ModelEntry)
 	}
@@ -323,6 +330,26 @@ func slotContext(selector string, ctx *int) (int, error) {
 		return 0, fmt.Errorf("model %q: ctx must be > 0", selector)
 	}
 	return *ctx, nil
+}
+
+func validateCORSOrigins(origins []string) error {
+	for _, origin := range origins {
+		if origin == anyCORSOrigin {
+			continue
+		}
+		parsed, err := url.Parse(origin)
+		isOrigin := err == nil &&
+			(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+			parsed.Host != "" &&
+			parsed.User == nil &&
+			parsed.Path == "" &&
+			!parsed.ForceQuery && parsed.RawQuery == "" &&
+			parsed.Fragment == ""
+		if !isOrigin {
+			return fmt.Errorf("server: cors_origins entry %q must be %q or scheme://host[:port] such as http://localhost:3000", origin, anyCORSOrigin)
+		}
+	}
+	return nil
 }
 
 func portFromSelector(selector string) int {
