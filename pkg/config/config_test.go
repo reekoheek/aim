@@ -172,11 +172,12 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       1,
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
 				Flags: map[string]any{
 					"-ngl":    999,
 					"-fa":     "on",
@@ -207,12 +208,13 @@ models:
 `,
 			selector: "b",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				Port:        portFromSelector("b"),
-				StopTimeout: 30 * time.Second,
-				Slots:       1,
-				Flags:       map[string]any{"--temp": 0.6},
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("b"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
+				Flags:        map[string]any{"--temp": 0.6},
 			},
 		},
 		{
@@ -233,13 +235,49 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				URL:          "http://127.0.0.1:12345",
+				Port:         12345,
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
+				Flags:        map[string]any{"--temp": 0.6, "-b": 512},
+			},
+		},
+		{
+			name: "start_timeout read by aim in seconds",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    start_timeout: 120
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 120 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
+			},
+		},
+		{
+			name: "zero start_timeout waits without limit",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    start_timeout: 0
+`,
+			selector: "m",
+			want: &LlamaCppEntry{
 				Lane:        DefaultLane,
 				Bin:         "llama-server",
-				URL:         "http://127.0.0.1:12345",
-				Port:        12345,
+				Port:        portFromSelector("m"),
 				StopTimeout: 30 * time.Second,
 				Slots:       1,
-				Flags:       map[string]any{"--temp": 0.6, "-b": 512},
 			},
 		},
 		{
@@ -254,12 +292,13 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				URL:         "http://model-level:1",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       1,
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				URL:          "http://model-level:1",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
 			},
 		},
 		{
@@ -272,11 +311,12 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "/opt/llama/llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       1,
+				Lane:         DefaultLane,
+				Bin:          "/opt/llama/llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
 			},
 		},
 		{
@@ -291,12 +331,13 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       3,
-				Flags:       map[string]any{"-b": 512},
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        3,
+				Flags:        map[string]any{"-b": 512},
 			},
 		},
 		{
@@ -310,12 +351,13 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       2,
-				Ctx:         64000,
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        2,
+				Ctx:          64000,
 			},
 		},
 		{
@@ -328,11 +370,12 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        DefaultLane,
-				Bin:         "llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       0,
+				Lane:         DefaultLane,
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        0,
 			},
 		},
 		{
@@ -345,11 +388,12 @@ models:
 `,
 			selector: "m",
 			want: &LlamaCppEntry{
-				Lane:        "gpu",
-				Bin:         "llama-server",
-				Port:        portFromSelector("m"),
-				StopTimeout: 30 * time.Second,
-				Slots:       1,
+				Lane:         "gpu",
+				Bin:          "llama-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Slots:        1,
 			},
 		},
 		{
@@ -435,7 +479,32 @@ models:
     model: x
     lane: gpu
 `,
-			wantErr: `model "m": lane is only for type llama-server`,
+			wantErr: `model "m": lane is only for types llama-server and sd-server`,
+		},
+		{
+			name: "start_timeout on a model that runs no local process",
+			yaml: `
+providers:
+  p:
+    base_url: http://localhost
+models:
+  m:
+    type: chat-completion
+    provider: p
+    model: x
+    start_timeout: 60
+`,
+			wantErr: `model "m": start_timeout is only for types llama-server and sd-server`,
+		},
+		{
+			name: "negative start_timeout",
+			yaml: `
+models:
+  m:
+    type: llama-server
+    start_timeout: -1
+`,
+			wantErr: `model "m": start_timeout must be >= 0`,
 		},
 		{
 			name: "negative slots",
@@ -610,6 +679,270 @@ func TestLoadRejectsEveryReservedFlag(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLoadSDServerEntry(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		selector string
+		want     *SDCppEntry
+	}{
+		{
+			name: "defaults with diffusion model",
+			yaml: `
+models:
+  flux:
+    type: sd-server
+    flags:
+      --diffusion-model: /models/flux.gguf
+      --offload-to-cpu: true
+`,
+			selector: "flux",
+			want: &SDCppEntry{
+				Lane:         DefaultLane,
+				Bin:          "sd-server",
+				Port:         portFromSelector("flux"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Flags:        map[string]any{"--diffusion-model": "/models/flux.gguf", "--offload-to-cpu": true},
+			},
+		},
+		{
+			name: "settings next to flags and model flag from template",
+			yaml: `
+templates:
+  sd:
+    -m: /models/sd15.safetensors
+    --color: true
+models:
+  sd15:
+    type: sd-server
+    bin: /opt/sd/sd-server
+    lane: gpu
+    start_timeout: 300
+    stop_timeout: 10
+    flags:
+      inherit: sd
+      port: 23456
+      --serve-html-path: /srv/ui.html
+`,
+			selector: "sd15",
+			want: &SDCppEntry{
+				Lane:         "gpu",
+				Bin:          "/opt/sd/sd-server",
+				Port:         23456,
+				StartTimeout: 300 * time.Second,
+				StopTimeout:  10 * time.Second,
+				Flags:        map[string]any{"-m": "/models/sd15.safetensors", "--color": true, "--serve-html-path": "/srv/ui.html"},
+			},
+		},
+		{
+			name: "llama-server flags set by aim are free on sd-server",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      --model: /models/m.gguf
+      --host: 0.0.0.0
+`,
+			selector: "m",
+			want: &SDCppEntry{
+				Lane:         DefaultLane,
+				Bin:          "sd-server",
+				Port:         portFromSelector("m"),
+				StartTimeout: 30 * time.Second,
+				StopTimeout:  30 * time.Second,
+				Flags:        map[string]any{"--model": "/models/m.gguf", "--host": "0.0.0.0"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, tt.yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got, err := cfg.GetSDCppEntry(tt.selector)
+			if err != nil {
+				t.Fatalf("GetSDCppEntry: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidSDServerSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "slots",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    slots: 2
+    flags:
+      -m: /models/m.gguf
+`,
+			wantErr: `model "m": slots is only for type llama-server`,
+		},
+		{
+			name: "ctx",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    ctx: 4096
+    flags:
+      -m: /models/m.gguf
+`,
+			wantErr: `model "m": ctx is only for type llama-server`,
+		},
+		{
+			name: "no model flag",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      --vae: /models/ae.safetensors
+`,
+			wantErr: `model "m": flags need one of -m, --model, --diffusion-model`,
+		},
+		{
+			name: "model flag turned off",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      --diffusion-model: false
+`,
+			wantErr: `model "m": flags need one of -m, --model, --diffusion-model`,
+		},
+		{
+			name: "empty model flag",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      -m: ""
+`,
+			wantErr: `model "m": flags need one of -m, --model, --diffusion-model`,
+		},
+		{
+			name: "setting without dash",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      -m: /models/m.gguf
+      steps: 4
+`,
+			wantErr: `model "m": unknown setting "steps" (sd-server flags start with - or --)`,
+		},
+		{
+			name: "listen flag in inherited template",
+			yaml: `
+templates:
+  sd:
+    --listen-port: 9000
+models:
+  m:
+    type: sd-server
+    flags:
+      inherit: sd
+      -m: /models/m.gguf
+`,
+			wantErr: `model "m": flag --listen-port is set by aim`,
+		},
+		{
+			name: "negative start_timeout",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    start_timeout: -5
+    flags:
+      -m: /models/m.gguf
+`,
+			wantErr: `model "m": start_timeout must be >= 0`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("got error %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsEveryReservedSDServerFlag(t *testing.T) {
+	for _, group := range sdServerReservedFlagGroups {
+		for _, flag := range group.names {
+			t.Run(flag, func(t *testing.T) {
+				yaml := fmt.Sprintf("models:\n  m:\n    type: sd-server\n    flags:\n      -m: /models/m.gguf\n      %s: true\n", flag)
+				_, err := Load(writeConfig(t, yaml))
+				want := fmt.Sprintf(`model "m": flag %s %s`, flag, group.reason)
+				if err == nil || err.Error() != want {
+					t.Errorf("got error %v, want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestGetSDCppEntry(t *testing.T) {
+	tests := []struct {
+		name     string
+		selector string
+		wantErr  string
+	}{
+		{name: "sd-server model", selector: "flux"},
+		{name: "llama-server model", selector: "chat", wantErr: `model "chat" is not type sd-server`},
+		{name: "missing model", selector: "gone", wantErr: `model "gone" not found in config`},
+	}
+
+	cfg, err := Load(writeConfig(t, `
+models:
+  flux:
+    type: sd-server
+    flags:
+      --diffusion-model: /models/flux.gguf
+  chat:
+    type: llama-server
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := cfg.GetSDCppEntry(tt.selector)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("got error %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got == nil {
+				t.Fatalf("got %v, %v", got, err)
+			}
+		})
 	}
 }
 
@@ -1018,6 +1351,18 @@ models:
     type: llama-server
 `,
 			want: ModelEntry{Type: ModelTypeLlamaServer},
+		},
+		{
+			name:     "sd-server",
+			selector: "m",
+			yaml: `
+models:
+  m:
+    type: sd-server
+    flags:
+      -m: /models/m.gguf
+`,
+			want: ModelEntry{Type: ModelTypeSDServer},
 		},
 		{
 			name:     "model missing from config",

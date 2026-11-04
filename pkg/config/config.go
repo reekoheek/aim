@@ -19,6 +19,9 @@ import (
 
 const (
 	defaultLlamaServerBin = "llama-server"
+	defaultSDServerBin    = "sd-server"
+	defaultStartTimeout   = 30 * time.Second
+	defaultStopTimeout    = 30 * time.Second
 	firstSelectorPort     = 10000
 	selectorPortRange     = 55536
 	defaultSlotExpiration = time.Hour
@@ -35,12 +38,19 @@ const (
 	ModelTypeSystemOne      = "systemone"
 	ModelTypeLlamaServer    = "llama-server"
 	ModelTypeAnthropic      = "anthropic"
+	ModelTypeSDServer       = "sd-server"
 )
 
 type reservedFlags struct {
 	names  []string
 	reason string
 }
+
+var sdServerReservedFlagGroups = []reservedFlags{
+	{names: []string{"-l", "--listen-ip", "--listen-port"}, reason: "is set by aim"},
+}
+
+var sdServerModelFlags = []string{"-m", "--model", "--diffusion-model"}
 
 var reservedFlagGroups = []reservedFlags{
 	{names: []string{"-np", "--parallel"}, reason: "is set by aim from slots"},
@@ -83,28 +93,41 @@ func (f LlamaCppFlags) overlay(top LlamaCppFlags) LlamaCppFlags {
 }
 
 type LlamaCppEntry struct {
-	Lane        string
-	Bin         string
-	URL         string
-	Port        int
-	StopTimeout time.Duration
-	Slots       int
-	Ctx         int
-	Flags       map[string]any
+	Lane         string
+	Bin          string
+	URL          string
+	Port         int
+	StartTimeout time.Duration
+	StopTimeout  time.Duration
+	Slots        int
+	Ctx          int
+	Flags        map[string]any
+}
+
+type SDCppEntry struct {
+	Lane         string
+	Bin          string
+	URL          string
+	Port         int
+	StartTimeout time.Duration
+	StopTimeout  time.Duration
+	Flags        map[string]any
 }
 
 type ModelEntry struct {
-	Type        string         `yaml:"type"`
-	Provider    string         `yaml:"provider"`
-	Model       string         `yaml:"model"`
-	Lane        string         `yaml:"lane"`
-	LlamaCpp    *LlamaCppEntry `yaml:"-"`
-	Flags       LlamaCppFlags  `yaml:"flags"`
-	Bin         string         `yaml:"bin"`
-	URL         string         `yaml:"url"`
-	StopTimeout int            `yaml:"stop_timeout"`
-	Slots       *int           `yaml:"slots"`
-	Ctx         *int           `yaml:"ctx"`
+	Type         string         `yaml:"type"`
+	Provider     string         `yaml:"provider"`
+	Model        string         `yaml:"model"`
+	Lane         string         `yaml:"lane"`
+	LlamaCpp     *LlamaCppEntry `yaml:"-"`
+	SDCpp        *SDCppEntry    `yaml:"-"`
+	Flags        LlamaCppFlags  `yaml:"flags"`
+	Bin          string         `yaml:"bin"`
+	URL          string         `yaml:"url"`
+	StartTimeout *int           `yaml:"start_timeout"`
+	StopTimeout  int            `yaml:"stop_timeout"`
+	Slots        *int           `yaml:"slots"`
+	Ctx          *int           `yaml:"ctx"`
 }
 
 type ProviderEntry struct {
@@ -139,7 +162,7 @@ func (c *Config) ResolveModel(selector string) (ModelEntry, error) {
 		if err := c.validateChatCompletion(selector, entry); err != nil {
 			return ModelEntry{}, err
 		}
-	case ModelTypeLlamaServer:
+	case ModelTypeLlamaServer, ModelTypeSDServer:
 	default:
 		return ModelEntry{}, fmt.Errorf("model %q has unsupported type %q", selector, entry.Type)
 	}
@@ -182,6 +205,20 @@ func (c *Config) GetLlamaCppEntry(selector string) (*LlamaCppEntry, error) {
 		return nil, fmt.Errorf("model %q has no llama.cpp config", selector)
 	}
 	return entry.LlamaCpp, nil
+}
+
+func (c *Config) GetSDCppEntry(selector string) (*SDCppEntry, error) {
+	entry, ok := c.Models[selector]
+	if !ok {
+		return nil, fmt.Errorf("model %q not found in config", selector)
+	}
+	if entry.Type != ModelTypeSDServer {
+		return nil, fmt.Errorf("model %q is not type %s", selector, ModelTypeSDServer)
+	}
+	if entry.SDCpp == nil {
+		return nil, fmt.Errorf("model %q has no sd.cpp config", selector)
+	}
+	return entry.SDCpp, nil
 }
 
 func (c *Config) GetModelURL(selector string) (string, error) {
@@ -252,34 +289,41 @@ func Load(path string) (*Config, error) {
 	}
 
 	for id, entry := range cfg.Models {
-		if entry.Type != ModelTypeLlamaServer {
-			if entry.Lane != "" {
-				return nil, fmt.Errorf("model %q: lane is only for type %s", id, ModelTypeLlamaServer)
-			}
-			continue
+		var err error
+		switch entry.Type {
+		case ModelTypeLlamaServer:
+			entry.LlamaCpp, err = cfg.newLlamaCppEntry(id, entry)
+		case ModelTypeSDServer:
+			entry.SDCpp, err = cfg.newSDCppEntry(id, entry)
+		default:
+			err = rejectLocalProcessSettings(id, entry)
 		}
-		llama, err := cfg.newLlamaCppEntry(id, entry)
 		if err != nil {
 			return nil, err
 		}
-		entry.LlamaCpp = llama
 		cfg.Models[id] = entry
 	}
 
 	return &cfg, nil
 }
 
+func rejectLocalProcessSettings(selector string, entry ModelEntry) error {
+	if entry.Lane != "" {
+		return fmt.Errorf("model %q: lane is only for types %s and %s", selector, ModelTypeLlamaServer, ModelTypeSDServer)
+	}
+	if entry.StartTimeout != nil {
+		return fmt.Errorf("model %q: start_timeout is only for types %s and %s", selector, ModelTypeLlamaServer, ModelTypeSDServer)
+	}
+	return nil
+}
+
 func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppEntry, error) {
-	flags := entry.Flags
-	if flags.Inherit != "" {
-		template, ok := c.Templates[flags.Inherit]
-		if !ok {
-			return nil, fmt.Errorf("template %q not found (used by model %q)", flags.Inherit, selector)
-		}
-		flags = template.overlay(flags)
+	flags, err := c.inheritFlags(selector, entry.Flags)
+	if err != nil {
+		return nil, err
 	}
 	for _, name := range sortedFlagNames(flags.Args) {
-		if err := validateFlagName(selector, name); err != nil {
+		if err := validateFlagName(selector, name, ModelTypeLlamaServer, reservedFlagGroups); err != nil {
 			return nil, err
 		}
 	}
@@ -291,18 +335,96 @@ func (c *Config) newLlamaCppEntry(selector string, entry ModelEntry) (*LlamaCppE
 	if err != nil {
 		return nil, err
 	}
+	startTimeout, err := startTimeoutDuration(selector, entry.StartTimeout)
+	if err != nil {
+		return nil, err
+	}
 
 	llama := &LlamaCppEntry{
-		Lane:        cmp.Or(entry.Lane, DefaultLane),
-		Bin:         cmp.Or(entry.Bin, defaultLlamaServerBin),
-		URL:         cmp.Or(entry.URL, flags.URL),
-		Port:        cmp.Or(flags.Port, portFromSelector(selector)),
-		StopTimeout: time.Duration(cmp.Or(entry.StopTimeout, 30)) * time.Second,
-		Slots:       slots,
-		Ctx:         ctx,
-		Flags:       flags.Args,
+		Lane:         cmp.Or(entry.Lane, DefaultLane),
+		Bin:          cmp.Or(entry.Bin, defaultLlamaServerBin),
+		URL:          cmp.Or(entry.URL, flags.URL),
+		Port:         cmp.Or(flags.Port, portFromSelector(selector)),
+		StartTimeout: startTimeout,
+		StopTimeout:  stopTimeoutDuration(entry.StopTimeout),
+		Slots:        slots,
+		Ctx:          ctx,
+		Flags:        flags.Args,
 	}
 	return llama, nil
+}
+
+func (c *Config) newSDCppEntry(selector string, entry ModelEntry) (*SDCppEntry, error) {
+	if entry.Slots != nil {
+		return nil, fmt.Errorf("model %q: slots is only for type %s", selector, ModelTypeLlamaServer)
+	}
+	if entry.Ctx != nil {
+		return nil, fmt.Errorf("model %q: ctx is only for type %s", selector, ModelTypeLlamaServer)
+	}
+	flags, err := c.inheritFlags(selector, entry.Flags)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range sortedFlagNames(flags.Args) {
+		if err := validateFlagName(selector, name, ModelTypeSDServer, sdServerReservedFlagGroups); err != nil {
+			return nil, err
+		}
+	}
+	if !hasAnyFlag(flags.Args, sdServerModelFlags) {
+		return nil, fmt.Errorf("model %q: flags need one of %s", selector, strings.Join(sdServerModelFlags, ", "))
+	}
+	startTimeout, err := startTimeoutDuration(selector, entry.StartTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	sd := &SDCppEntry{
+		Lane:         cmp.Or(entry.Lane, DefaultLane),
+		Bin:          cmp.Or(entry.Bin, defaultSDServerBin),
+		URL:          cmp.Or(entry.URL, flags.URL),
+		Port:         cmp.Or(flags.Port, portFromSelector(selector)),
+		StartTimeout: startTimeout,
+		StopTimeout:  stopTimeoutDuration(entry.StopTimeout),
+		Flags:        flags.Args,
+	}
+	return sd, nil
+}
+
+func (c *Config) inheritFlags(selector string, flags LlamaCppFlags) (LlamaCppFlags, error) {
+	if flags.Inherit == "" {
+		return flags, nil
+	}
+	template, ok := c.Templates[flags.Inherit]
+	if !ok {
+		return LlamaCppFlags{}, fmt.Errorf("template %q not found (used by model %q)", flags.Inherit, selector)
+	}
+	return template.overlay(flags), nil
+}
+
+func hasAnyFlag(flags map[string]any, names []string) bool {
+	for _, name := range names {
+		if value, ok := flags[name]; ok && value != false && value != nil && value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func startTimeoutDuration(selector string, seconds *int) (time.Duration, error) {
+	if seconds == nil {
+		return defaultStartTimeout, nil
+	}
+	if *seconds < 0 {
+		return 0, fmt.Errorf("model %q: start_timeout must be >= 0", selector)
+	}
+	return time.Duration(*seconds) * time.Second, nil
+}
+
+func stopTimeoutDuration(seconds int) time.Duration {
+	if seconds == 0 {
+		return defaultStopTimeout
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func sortedFlagNames(flags map[string]any) []string {
@@ -314,11 +436,11 @@ func sortedFlagNames(flags map[string]any) []string {
 	return names
 }
 
-func validateFlagName(selector string, name string) error {
+func validateFlagName(selector string, name string, modelType string, reserved []reservedFlags) error {
 	if !strings.HasPrefix(name, "-") {
-		return fmt.Errorf("model %q: unknown setting %q (llama-server flags start with - or --)", selector, name)
+		return fmt.Errorf("model %q: unknown setting %q (%s flags start with - or --)", selector, name, modelType)
 	}
-	for _, group := range reservedFlagGroups {
+	for _, group := range reserved {
 		if slices.Contains(group.names, name) {
 			return fmt.Errorf("model %q: flag %s %s", selector, name, group.reason)
 		}
