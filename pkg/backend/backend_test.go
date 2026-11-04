@@ -169,6 +169,8 @@ func TestDescriptorDefaults(t *testing.T) {
 	}{
 		{name: "llama linux", descriptor: LlamaCpp, platform: Platform{OS: "linux", Arch: "amd64"}, build: "b1", wantVariant: "vulkan", wantStripPrefix: "llama-b1/"},
 		{name: "llama darwin", descriptor: LlamaCpp, platform: Platform{OS: "darwin", Arch: "arm64"}, build: "b1", wantVariant: "metal", wantStripPrefix: "llama-b1/"},
+		{name: "llama darwin intel falls back to cpu", descriptor: LlamaCpp, platform: Platform{OS: "darwin", Arch: "amd64"}, build: "b1", wantVariant: "cpu", wantStripPrefix: "llama-b1/"},
+		{name: "unsupported platform keeps default", descriptor: LlamaCpp, platform: Platform{OS: "plan9", Arch: "amd64"}, build: "b1", wantVariant: "vulkan", wantStripPrefix: "llama-b1/"},
 		{name: "sd windows", descriptor: SDCpp, platform: Platform{OS: "windows", Arch: "amd64"}, build: "master-1-abc", wantVariant: "vulkan"},
 	}
 

@@ -165,10 +165,27 @@ func (d Descriptor) HasVariant(variant string) bool {
 }
 
 func (d Descriptor) DefaultVariantFor(platform Platform) string {
-	if variant, ok := d.DefaultVariantByOS[platform.OS]; ok {
+	if variant, ok := d.DefaultVariantByOS[platform.OS]; ok && d.supportsVariant(platform, variant) {
 		return variant
 	}
+	if d.supportsVariant(platform, d.DefaultVariant) {
+		return d.DefaultVariant
+	}
+	for _, pattern := range d.Assets {
+		if pattern.OS == platform.OS && pattern.Arch == platform.Arch {
+			return pattern.Variant
+		}
+	}
 	return d.DefaultVariant
+}
+
+func (d Descriptor) supportsVariant(platform Platform, variant string) bool {
+	for _, pattern := range d.Assets {
+		if pattern.OS == platform.OS && pattern.Arch == platform.Arch && pattern.Variant == variant {
+			return true
+		}
+	}
+	return false
 }
 
 func (d Descriptor) PickAsset(release Release, platform Platform, variant string) (Asset, bool) {
