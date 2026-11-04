@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"log/slog"
@@ -62,7 +63,7 @@ func (f *Forwarder) Forward(ctx context.Context, w http.ResponseWriter, req *str
 		httpReq.Header.Set(k, v)
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", cmp.Or(req.ContentType, strategy.JSONContentType))
 
 	httpResp, err := f.client.Do(httpReq)
 	if err != nil {

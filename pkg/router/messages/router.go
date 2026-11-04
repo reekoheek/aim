@@ -119,6 +119,8 @@ func otherEndpointError(selector string, entry config.ModelEntry) error {
 		return fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.ChatCompletionsPath)
 	case config.ModelTypeSystemOne:
 		return fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.SystemOnePath)
+	case config.ModelTypeSDServer:
+		return fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.ImageGenerationsPath)
 	default:
 		return fmt.Errorf("unsupported type %q", entry.Type)
 	}

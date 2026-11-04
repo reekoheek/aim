@@ -146,6 +146,7 @@ func TestForwardUpstreamHeaders(t *testing.T) {
 	tests := []struct {
 		name         string
 		headers      http.Header
+		contentType  string
 		extraHeaders map[string]string
 		want         http.Header
 	}{
@@ -171,9 +172,15 @@ func TestForwardUpstreamHeaders(t *testing.T) {
 			want:         http.Header{"Authorization": {"Bearer provider"}},
 		},
 		{
-			name:    "content type is always JSON",
+			name:    "content type is JSON without a request content type",
 			headers: http.Header{"Content-Type": {"text/plain"}},
 			want:    http.Header{"Content-Type": {"application/json"}},
+		},
+		{
+			name:        "request content type is sent as-is",
+			headers:     http.Header{"Content-Type": {"text/plain"}},
+			contentType: "multipart/form-data; boundary=xyz",
+			want:        http.Header{"Content-Type": {"multipart/form-data; boundary=xyz"}},
 		},
 	}
 
@@ -185,7 +192,7 @@ func TestForwardUpstreamHeaders(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 
-			req := &strategy.Request{Body: []byte(`{}`), Headers: tt.headers}
+			req := &strategy.Request{Body: []byte(`{}`), Headers: tt.headers, ContentType: tt.contentType}
 			New(&http.Client{}, logger.New("ERROR")).Forward(context.Background(), httptest.NewRecorder(), req, upstream.URL, tt.extraHeaders)
 
 			got := <-received

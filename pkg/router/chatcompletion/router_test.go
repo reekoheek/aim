@@ -64,6 +64,11 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 			body:        `{"model":"claude"}`,
 			wantMessage: `model "claude" is type anthropic, use /v1/messages`,
 		},
+		{
+			name:        "sd-server model",
+			body:        `{"model":"flux"}`,
+			wantMessage: `model "flux" is type sd-server, use /v1/images/generations`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -73,6 +78,7 @@ func TestHandlerRejectsUnresolvableModel(t *testing.T) {
 					"orphan":  {Type: config.ModelTypeChatCompletion, Provider: "gone", Model: "upstream-model"},
 					"decider": {Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
 					"claude":  {Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
+					"flux":    {Type: config.ModelTypeSDServer},
 				},
 				Providers: map[string]config.ProviderEntry{"p": {BaseURL: "http://127.0.0.1:1"}},
 			}
@@ -255,6 +261,11 @@ func TestNewStrategy(t *testing.T) {
 			name:    "anthropic belongs to the messages endpoint",
 			entry:   config.ModelEntry{Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
 			wantErr: `model "m" is type anthropic, use /v1/messages`,
+		},
+		{
+			name:    "sd-server belongs to the images endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeSDServer},
+			wantErr: `model "m" is type sd-server, use /v1/images/generations`,
 		},
 		{
 			name:    "unsupported type",

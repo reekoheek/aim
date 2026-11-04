@@ -18,6 +18,7 @@ import (
 	"github.com/reekoheek/aim/pkg/config"
 	"github.com/reekoheek/aim/pkg/lane"
 	"github.com/reekoheek/aim/pkg/router/chatcompletion"
+	"github.com/reekoheek/aim/pkg/router/images"
 	"github.com/reekoheek/aim/pkg/router/messages"
 	"github.com/reekoheek/aim/pkg/router/systemone"
 	"github.com/reekoheek/aim/pkg/strategy"
@@ -80,6 +81,7 @@ func serve(cfgFile string) error {
 	chatCompletionRouter := chatcompletion.New(cfg, l, supervisor)
 	systemOneRouter := systemone.New(cfg, l, supervisor)
 	messagesRouter := messages.New(cfg, l, supervisor)
+	imagesRouter := images.New(cfg, l, supervisor)
 	serverCfg := cfg.DefaultServer()
 	addr := fmt.Sprintf("%s:%d", serverCfg.Host, serverCfg.Port)
 
@@ -88,6 +90,8 @@ func serve(cfgFile string) error {
 	mux.HandleFunc(http.MethodPost+" "+strategy.SystemOnePath, systemOneRouter.Handler)
 	mux.HandleFunc(http.MethodPost+" "+strategy.MessagesPath, messagesRouter.Handler)
 	mux.HandleFunc(http.MethodPost+" "+strategy.CountTokensPath, messagesRouter.CountTokensHandler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.ImageGenerationsPath, imagesRouter.GenerationsHandler)
+	mux.HandleFunc(http.MethodPost+" "+strategy.ImageEditsPath, imagesRouter.EditsHandler)
 
 	server := &http.Server{
 		Addr:    addr,

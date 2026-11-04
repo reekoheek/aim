@@ -96,6 +96,8 @@ func (r *Router) newStrategy(selector string, entry config.ModelEntry) (strategy
 		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.SystemOnePath)
 	case config.ModelTypeAnthropic:
 		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.MessagesPath)
+	case config.ModelTypeSDServer:
+		return nil, fmt.Errorf("model %q is type %s, use %s", selector, entry.Type, strategy.ImageGenerationsPath)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", entry.Type)
 	}

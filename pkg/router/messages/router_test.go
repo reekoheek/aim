@@ -71,6 +71,7 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 		{name: "provider missing from config", body: `{"model":"orphan"}`, wantMessage: `provider "gone" not found in config`},
 		{name: "chat-completion model", body: `{"model":"chat"}`, wantMessage: `model "chat" is type chat-completion, use /v1/chat/completions`},
 		{name: "systemone model", body: `{"model":"decider"}`, wantMessage: `model "decider" is type systemone, use /v1/systemone`},
+		{name: "sd-server model", body: `{"model":"flux"}`, wantMessage: `model "flux" is type sd-server, use /v1/images/generations`},
 		{name: "unreadable body", wantMessage: "failed to read request body"},
 		{name: "malformed JSON", body: `{"model":`, wantMessage: "invalid JSON"},
 		{name: "JSON array", body: `[{"model":"claude"}]`, wantMessage: "invalid JSON"},
@@ -81,6 +82,7 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 			"orphan":  {Type: config.ModelTypeAnthropic, Provider: "gone", Model: "upstream-claude"},
 			"chat":    {Type: config.ModelTypeChatCompletion, Provider: "p", Model: "upstream-chat"},
 			"decider": {Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
+			"flux":    {Type: config.ModelTypeSDServer},
 		},
 		Providers: map[string]config.ProviderEntry{"p": {BaseURL: "http://127.0.0.1:1"}},
 	}
@@ -219,6 +221,11 @@ func TestNewStrategy(t *testing.T) {
 			name:    "systemone belongs to its own endpoint",
 			entry:   config.ModelEntry{Type: config.ModelTypeSystemOne, Provider: "p", Model: "upstream-decider"},
 			wantErr: `model "m" is type systemone, use /v1/systemone`,
+		},
+		{
+			name:    "sd-server belongs to the images endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeSDServer},
+			wantErr: `model "m" is type sd-server, use /v1/images/generations`,
 		},
 		{
 			name:    "unsupported type",

@@ -108,6 +108,12 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 			wantParam:   modelParam,
 			wantMessage: `model "claude" is type anthropic, use /v1/messages`,
 		},
+		{
+			name:        "sd-server model",
+			body:        `{"model":"flux","questions":` + validQuestions + `}`,
+			wantParam:   modelParam,
+			wantMessage: `model "flux" is type sd-server, use /v1/images/generations`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -118,6 +124,7 @@ func TestHandlerRejectsInvalidRequest(t *testing.T) {
 					"orphan":  {Type: config.ModelTypeSystemOne, Provider: "gone", Model: "upstream-decider"},
 					"chat":    {Type: config.ModelTypeChatCompletion, Provider: "p", Model: "upstream-chat"},
 					"claude":  {Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
+					"flux":    {Type: config.ModelTypeSDServer},
 					"local": {
 						Type:     config.ModelTypeLlamaServer,
 						LlamaCpp: &config.LlamaCppEntry{Bin: filepath.Join(t.TempDir(), "missing-llama-server")},
@@ -275,6 +282,11 @@ func TestNewStrategy(t *testing.T) {
 			name:    "anthropic belongs to the messages endpoint",
 			entry:   config.ModelEntry{Type: config.ModelTypeAnthropic, Provider: "p", Model: "upstream-claude"},
 			wantErr: `model "m" is type anthropic, use /v1/messages`,
+		},
+		{
+			name:    "sd-server belongs to the images endpoint",
+			entry:   config.ModelEntry{Type: config.ModelTypeSDServer},
+			wantErr: `model "m" is type sd-server, use /v1/images/generations`,
 		},
 		{
 			name:    "unsupported type",

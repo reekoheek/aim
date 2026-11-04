@@ -9,11 +9,15 @@ import (
 )
 
 const (
-	ChatCompletionsPath = "/v1/chat/completions"
-	SystemOnePath       = "/v1/systemone"
-	MessagesPath        = "/v1/messages"
-	CountTokensPath     = "/v1/messages/count_tokens"
+	ChatCompletionsPath  = "/v1/chat/completions"
+	SystemOnePath        = "/v1/systemone"
+	MessagesPath         = "/v1/messages"
+	CountTokensPath      = "/v1/messages/count_tokens"
+	ImageGenerationsPath = "/v1/images/generations"
+	ImageEditsPath       = "/v1/images/edits"
 )
+
+const JSONContentType = "application/json"
 
 const (
 	sessionAffinityHeader   = "X-Session-Affinity"
@@ -30,11 +34,12 @@ type Strategy interface {
 }
 
 type Request struct {
-	Stream  bool
-	Body    []byte
-	Headers http.Header
-	Query   string
-	Errors  ErrorWriter
+	Stream      bool
+	Body        []byte
+	ContentType string
+	Headers     http.Header
+	Query       string
+	Errors      ErrorWriter
 }
 
 func (r *Request) SessionID() string {
