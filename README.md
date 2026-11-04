@@ -1,6 +1,6 @@
 # aim
 
-AI Management Server — lightweight LLM proxy with multi-model support. Forwards requests to OpenAI- and Anthropic-compatible APIs and to llama.cpp's llama-server.
+AI Management Server — lightweight LLM proxy with multi-model support. Forwards requests to OpenAI- and Anthropic-compatible APIs, to llama.cpp's llama-server and to stable-diffusion.cpp's sd-server.
 
 ## Quick Start
 
@@ -86,9 +86,9 @@ Keys without a dash are aim settings:
 - `inherit: <template>` starts from a template under `templates`; the model's flags and settings win
 - `port`, `url` — where aim runs and reaches llama-server
 
-Next to `flags`, a model also takes `bin` (default: `llama-server` from `PATH`) and `stop_timeout` (seconds aim waits for llama-server to stop before killing it, default 30).
+Next to `flags`, a model also takes `bin` (default: `llama-server` from `PATH`), `start_timeout` (seconds aim waits for llama-server to answer `/health` after starting it, default 30, `0` = no limit) and `stop_timeout` (seconds aim waits for llama-server to stop before killing it, default 30). `start_timeout` and `lane` are only accepted on `llama-server` and `sd-server` models.
 
-`lane: <name>`, also next to `flags`, picks where the model's llama-server runs (default `default`). A lane runs one llama-server at a time: a request for another model on the same lane waits for the requests in flight, stops the running llama-server and starts its own. Models on different lanes run side by side, e.g. a chat model on `lane: gpu` next to a small decision model on `lane: cpu`. Each lane stops its llama-server after `idle_timeout` on its own. `lane` is only accepted on `llama-server` models.
+`lane: <name>`, also next to `flags`, picks where the model's llama-server runs (default `default`). A lane runs one process at a time (a llama-server or an [sd-server](#local-sd-server-models)): a request for another model on the same lane waits for the requests in flight, stops the running process and starts its own. Models on different lanes run side by side, e.g. a chat model on `lane: gpu` next to a small decision model on `lane: cpu`. Each lane stops its process after `idle_timeout` on its own.
 
 `slots` and `ctx`, also next to `flags`, size the model's slots:
 
@@ -125,7 +125,32 @@ models:
 
 llama-server itself also applies the `[*]` section of `~/.config/llama.cpp/config.ini` (or `$XDG_CONFIG_HOME/llama.cpp/config.ini`, `/etc/llama.cpp/config.ini`) to every run, including the ones aim starts.
 
-`chat-completion` models are served on `/v1/chat/completions`, `systemone` models on `/v1/systemone` and `anthropic` models on `/v1/messages`; all three forward to the provider's `base_url` with the provider's `api_key` and the entry's `model`. A `llama-server` model is served on every endpoint (see below). The query string is passed upstream as-is, and so are the upstream's response headers.
+### Local sd-server models
+
+An `sd-server` model runs [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)'s `sd-server` on demand, the same way as a `llama-server` model: `flags` are passed as-is (sorted, `true` alone, `false` left out), `inherit` picks a template from the same `templates`, and `bin` (default: `sd-server` from `PATH`), `lane`, `start_timeout`, `stop_timeout`, `port` and `url` work as above.
+
+- `flags` must name the model with `-m`, `--model` or `--diffusion-model` (directly or through `inherit`), otherwise aim stops at startup
+- aim sets `--listen-ip` and `--listen-port` itself; writing them (or `-l`) in `flags` stops aim at startup. `slots` and `ctx` are rejected too
+- aim waits for `GET /v1/models` to answer before sending requests; sd-server loads the model before it listens, so large models may need a higher `start_timeout`
+- sd-server shares lanes with llama-server: an image model on the same lane as a chat model swaps with it; put it on its own lane to keep both loaded
+
+```yaml
+models:
+  flux-schnell:
+    type: sd-server
+    lane: gpu
+    start_timeout: 300
+    flags:
+      --diffusion-model: /models/flux1-schnell-q4_k.gguf
+      --vae: /models/ae.safetensors
+      --clip_l: /models/clip_l.safetensors
+      --t5xxl: /models/t5xxl_fp16.safetensors
+      --cfg-scale: 1.0
+      --steps: 4
+      --offload-to-cpu: true
+```
+
+`chat-completion` models are served on `/v1/chat/completions`, `systemone` models on `/v1/systemone` and `anthropic` models on `/v1/messages`; all three forward to the provider's `base_url` with the provider's `api_key` and the entry's `model`. A `llama-server` model is served on every chat endpoint (see below), and an `sd-server` model only on the images endpoints. The query string is passed upstream as-is, and so are the upstream's response headers.
 
 ## Usage
 
@@ -178,6 +203,24 @@ curl -X POST http://localhost:8080/v1/messages \
 - a `llama-server` model forwards to llama-server's own `/v1/messages` with the same slot cache as chat requests; `count_tokens` starts the model when needed but takes no slot. llama.cpp drops `id_slot` on `/v1/messages` until [ggml-org/llama.cpp#28554](https://github.com/ggml-org/llama.cpp/pull/28554) is merged, so with `slots` above 1 llama-server picks the slot itself and the slot cache saves and restores the wrong sessions more often (replies stay correct, they are just computed again). With `slots: 1` there is only one slot and the cache works fully.
 - `chat-completion` and `systemone` models are rejected, and so is an `anthropic` model on `/v1/chat/completions` and `/v1/systemone`
 - errors aim writes itself use Anthropic's shape, `{"type":"error","error":{"type":"invalid_request_error" or "api_error","message":"…"}}`; errors from the provider or from llama-server (which answers in OpenAI's shape) are passed through unchanged
+
+### Images endpoint
+
+`/v1/images/generations` and `/v1/images/edits` serve `sd-server` models through sd-server's OpenAI-compatible images API:
+
+```bash
+curl -X POST http://localhost:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model": "flux-schnell", "prompt": "a lighthouse at dusk", "size": "1024x1024"}'
+
+curl -X POST http://localhost:8080/v1/images/edits \
+  -F model=flux-schnell -F prompt="make it night" -F image=@input.png
+```
+
+- `model` is required: in the JSON body for `generations`, as a form field for `edits` (which must be `multipart/form-data`)
+- the body, its `Content-Type`, the query string and the headers are passed to sd-server as-is, `model` included (sd-server ignores it). Images come back as `b64_json`; there is no streaming
+- only `sd-server` models are accepted; every other type is rejected, and an `sd-server` model is rejected on the chat, messages and systemone endpoints
+- sd-server's `/sdapi/v1/*` and `/sdcpp/v1/*` APIs are not served
 
 ### With Claude Code
 
@@ -277,7 +320,7 @@ Layout:
 - On Windows `current` is a plain file naming the active folder (no symlink privileges needed), and `add`/`use` print the binary path to put in `bin`.
 - `GITHUB_TOKEN` or `GH_TOKEN` is sent to the GitHub API when set, which raises the rate limit.
 
-Nothing is restarted. A `llama-server` model's `bin` defaults to `llama-server` from `PATH`, so `aim serve` uses the new build the next time it starts the lane. Under systemd `~/.local/bin` is usually not on `PATH`: set `bin` to an absolute path (e.g. `/home/me/.local/bin/llama-server` or `<root>/llama.cpp/current/llama-server`), or add `Environment=PATH=/home/me/.local/bin:/usr/bin:/bin` to the unit.
+Nothing is restarted. A `llama-server` model's `bin` defaults to `llama-server` from `PATH` (an `sd-server` model's to `sd-server`), so `aim serve` uses the new build the next time it starts the lane. Under systemd `~/.local/bin` is usually not on `PATH`: set `bin` to an absolute path (e.g. `/home/me/.local/bin/llama-server` or `<root>/llama.cpp/current/llama-server`), or add `Environment=PATH=/home/me/.local/bin:/usr/bin:/bin` to the unit.
 
 ## Structure
 
